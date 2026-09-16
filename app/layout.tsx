@@ -18,6 +18,7 @@ import { RouteProgress } from "@/components/RouteProgress";
 import { BaCursor } from "@/components/BaCursor";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
+import { BeianFooter } from "@/components/BeianFooter";
 import { DEFAULT_LOCALE } from "@/lib/i18n/config";
 import { zh } from "@/lib/i18n/zh";
 import { en } from "@/lib/i18n/en";
@@ -109,7 +110,11 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
               <ClickFX />
               <DeviceModeToggle />
             </main>
-            <Footer siteConfig={siteConfig} contacts={footerContacts} />
+            <Footer siteConfig={siteConfig} contacts={footerContacts}>
+              {/* 备案区块为 server component（M4.2）：服务端读运行时 env 渲染，
+                  经 children 传入 client 组件 Footer，不受客户端 hydration 影响 */}
+              <BeianFooter />
+            </Footer>
           </LocaleProvider>
         </ThemeProvider>
       </body>

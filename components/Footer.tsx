@@ -12,9 +12,11 @@ interface FooterProps {
   };
   /** 与关于页同源的联系方式（SiteSettings.aboutContacts，layout 传入） */
   contacts: AboutContactCard[];
+  /** 服务端渲染的尾部附加区块（备案信息 BeianFooter，见 M4.2 根因修复） */
+  children?: React.ReactNode;
 }
 
-export function Footer({ siteConfig, contacts }: FooterProps) {
+export function Footer({ siteConfig, contacts, children }: FooterProps) {
   const { locale } = useLocale();
   const zhMode = locale === "zh-CN";
 
@@ -87,41 +89,11 @@ export function Footer({ siteConfig, contacts }: FooterProps) {
         >
           {zhMode ? "因为热爱，所以存在" : "Powered by passion, exists for love"}
         </p>
-        {/* 备案信息（ICP / 公安联网备案）——值由部署环境通过 NEXT_PUBLIC_* 注入，
-            仓库不存储任何备案号；未配置时不渲染 */}
-        {(process.env.NEXT_PUBLIC_ICP_NUMBER ||
-          process.env.NEXT_PUBLIC_GONGAN_NUMBER) && (
-          <div className="mt-5 flex flex-col items-center gap-1.5 text-xs text-slate-400 dark:text-slate-500">
-            {process.env.NEXT_PUBLIC_ICP_NUMBER && (
-              <a
-                href="https://beian.miit.gov.cn/"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="transition-colors hover:text-[color:rgb(var(--ba-primary))]"
-              >
-                {process.env.NEXT_PUBLIC_ICP_NUMBER}
-              </a>
-            )}
-            {process.env.NEXT_PUBLIC_GONGAN_NUMBER && (
-              <a
-                href={`https://beian.mps.gov.cn/#/query/webSearch?code=${process.env.NEXT_PUBLIC_GONGAN_CODE}`}
-                target="_blank"
-                rel="noreferrer noopener"
-                className="flex items-center gap-1.5 transition-colors hover:text-[color:rgb(var(--ba-primary))]"
-              >
-                {/* eslint-disable-next-line @next/next/no-img-element -- 公安备案小图标，静态资源无需 next/image 优化 */}
-                <img
-                  src="/gongan-beian.png"
-                  alt="公安联网备案图标"
-                  width={18}
-                  height={20}
-                  className="h-5 w-auto"
-                />
-                {process.env.NEXT_PUBLIC_GONGAN_NUMBER}
-              </a>
-            )}
-          </div>
-        )}
+        {/* 备案信息（ICP / 公安联网备案）：server component（layout 以 children
+            传入）。M4.2 根因修复——此前写在本 client 组件内，可见性条件依赖
+            构建期 env 内联，部署链路上客户端 bundle 与服务端运行时不一致时
+            hydration 会把 SSR 渲染出的备案删掉；改为服务端渲染后不受影响。 */}
+        {children}
       </div>
     </footer>
   );
