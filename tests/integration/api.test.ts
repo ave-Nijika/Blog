@@ -109,6 +109,7 @@ async function startServer(): Promise<void> {
       CAPTCHA_ENABLED: "false",
       SEARCH_RATE_LIMIT_WINDOW_SECONDS: "2",
       SEARCH_RATE_LIMIT_MAX_ATTEMPTS: "5",
+      UPLOAD_RATE_LIMIT_MAX_ATTEMPTS: "100", // 上传用例组较多，显式放开避免贴默认限流线
       COMMENT_LLM_ENABLED: "false",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -1133,6 +1134,325 @@ describe("文章物理删除与存档（方案 C）", () => {
       body: "{}",
     });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("媒体上传与删除联动（M1-补丁1）", () => {
+  const jsonHeaders = () => ({
+    "Content-Type": "application/json",
+    "X-CSRF-Token": csrfToken,
+  });
+  /** 走真实 HTTP + 落盘的用例会留下上传文件，统一登记后尽力清理 */
+  const uploadedUrls: string[] = [];
+
+  function minimalPng(): Buffer {
+    const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const ihdrData = Buffer.alloc(13, 0);
+    ihdrData.writeUInt32BE(1, 0);
+    ihdrData.writeUInt32BE(1, 4);
+    ihdrData[8] = 8;
+    ihdrData[9] = 2;
+    const ihdr = Buffer.concat([
+      Buffer.from([0, 0, 0, 13]),
+      Buffer.from("IHDR"),
+      ihdrData,
+      Buffer.from([0, 0, 0, 0]),
+    ]);
+    const iend = Buffer.concat([Buffer.from([0, 0, 0, 0]), Buffer.from("IEND"), Buffer.from([0xae, 0x42, 0x60, 0x82])]);
+    return Buffer.concat([sig, ihdr, iend]);
+  }
+
+  function minimalWebm(): Buffer {
+    // EBML 头签名（魔数校验只看前 4 字节）+ 填充
+    return Buffer.concat([
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
+      Buffer.alloc(64, 0x42),
+    ]);
+  }
+
+  function uploadForm(
+    file: { bytes: Buffer; name: string; type: string },
+    extra: Record<string, string> = {}
+  ): FormData {
+    const form = new FormData();
+    form.append("file", new Blob([file.bytes], { type: file.type }), file.name);
+    for (const [k, v] of Object.entries(extra)) form.append(k, v);
+    return form;
+  }
+
+  function diskPathOf(url: string): string {
+    // /uploads/images/x.png → public/uploads/images/x.png（默认存储根=cwd/public/uploads）
+    return path.join(process.cwd(), "public", url);
+  }
+
+  async function createArticle(slug: string, body: string): Promise<string> {
+    const res = await req("/api/admin/posts", {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({
+        slug,
+        title: `媒体测试-${slug}`,
+        status: "draft",
+        category: "测试",
+        body,
+      }),
+    });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as { post: { id: string } };
+    return created.post.id;
+  }
+
+  afterAll(async () => {
+    // 尽力清理：普通上传用例的落盘文件（引用计数用例由删除联动自行清理）
+    for (const url of uploadedUrls) {
+      try {
+        fs.rmSync(diskPathOf(url), { force: true });
+      } catch {
+        /* best effort */
+      }
+    }
+  });
+
+  it("F1 鉴权：未登录 401；登录后无 CSRF 403；CSRF 失败不落盘", async () => {
+    const anon = await fetch(`${BASE}/api/admin/upload`, {
+      method: "POST",
+      body: uploadForm({ bytes: minimalPng(), name: "a.png", type: "image/png" }),
+    });
+    expect(anon.status).toBe(401);
+    const noCsrf = await req("/api/admin/upload", {
+      method: "POST",
+      body: uploadForm({ bytes: minimalPng(), name: "a.png", type: "image/png" }),
+    });
+    expect(noCsrf.status).toBe(403);
+  });
+
+  it("F1 类型白名单：.txt 415；MIME 与扩展名不一致 415；魔数不符 415", async () => {
+    const wrongExt = await req("/api/admin/upload", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: uploadForm({ bytes: Buffer.from("text"), name: "a.txt", type: "text/plain" }),
+    });
+    expect(wrongExt.status).toBe(415);
+    const wrongMime = await req("/api/admin/upload", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: uploadForm({ bytes: minimalPng(), name: "a.png", type: "application/json" }),
+    });
+    expect(wrongMime.status).toBe(415);
+    const wrongMagic = await req("/api/admin/upload", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: uploadForm({
+        bytes: Buffer.from("not a png"),
+        name: "fake.png",
+        type: "image/png",
+      }),
+    });
+    expect(wrongMagic.status).toBe(415);
+    const wrongMagicBody = (await wrongMagic.json()) as { error?: string };
+    expect(wrongMagicBody.error).toBeTruthy();
+  });
+
+  it("F1 大小分级：图片超 10MB 413（视频 50MB 同路径，不重复造大缓冲）", async () => {
+    const big = Buffer.concat([minimalPng(), Buffer.alloc(10 * 1024 * 1024 + 1, 0)]);
+    const res = await req("/api/admin/upload", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: uploadForm({ bytes: big, name: "big.png", type: "image/png" }),
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it("F1 正常图片上传：200 + 安全文件名 + 落盘 + URL 可访问", async () => {
+    const res = await req("/api/admin/upload", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: uploadForm(
+        { bytes: minimalPng(), name: "主人的 截图#1.png", type: "image/png" },
+        {}
+      ),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      url: string;
+      kind: string;
+      size: number;
+      mime: string;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.kind).toBe("image");
+    expect(body.mime).toBe("image/png");
+    expect(body.size).toBe(minimalPng().length);
+    // A5：文件名只由服务端生成 {YYYYMMDD}-{8位随机}.{ext}，无客户端可控成分
+    expect(body.url).toMatch(/^\/uploads\/images\/\d{8}-[0-9a-f]{8}\.png$/);
+    uploadedUrls.push(body.url);
+
+    // 落盘存在
+    expect(fs.existsSync(diskPathOf(body.url))).toBe(true);
+    // URL 可访问（Next 运行时从 public/ 提供静态服务）
+    const served = await req(body.url, {}, { useJar: false });
+    expect(served.status).toBe(200);
+    expect(served.headers.get("content-type")).toContain("image/png");
+  });
+
+  it("F1 正常视频上传：200 + 落盘 videos 目录", async () => {
+    const res = await req("/api/admin/upload", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: uploadForm({ bytes: minimalWebm(), name: "clip.webm", type: "video/webm" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; url: string; kind: string };
+    expect(body.ok).toBe(true);
+    expect(body.kind).toBe("video");
+    expect(body.url).toMatch(/^\/uploads\/videos\/\d{8}-[0-9a-f]{8}\.webm$/);
+    uploadedUrls.push(body.url);
+    expect(fs.existsSync(diskPathOf(body.url))).toBe(true);
+  });
+
+  it("F4/E4 场景1：单文引用删文 → 文件删 + media.delete 审计", async () => {
+    const up = await req("/api/admin/upload", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: uploadForm({ bytes: minimalPng(), name: "solo.png", type: "image/png" }),
+    });
+    const { url } = (await up.json()) as { url: string };
+    expect(up.status).toBe(200);
+    uploadedUrls.push(url);
+
+    const id = await createArticle("media-del-a", `正文\n\n![单图](${url})\n\n尾部`);
+    const del = await req(`/api/admin/posts/${id}`, {
+      method: "DELETE",
+      headers: jsonHeaders(),
+    });
+    expect(del.status).toBe(200);
+    const delBody = (await del.json()) as {
+      mediaCleanup: { deleted: string[]; kept: number };
+    };
+    expect(delBody.mediaCleanup.deleted).toContain(url);
+    expect(delBody.mediaCleanup.kept).toBe(0);
+    expect(fs.existsSync(diskPathOf(url))).toBe(false);
+
+    // 审计日志：media.delete 已记录（红线 6）
+    const logs = (await (
+      await req("/api/admin/audit-logs?targetType=media&perPage=50")
+    ).json()) as { items: { action: string; targetId: string }[] };
+    expect(
+      logs.items.some((l) => l.action === "media.delete" && l.targetId === "media-del-a")
+    ).toBe(true);
+    expect(logs.items.some((l) => l.action === "media.upload")).toBe(true);
+  });
+
+  it("F4/E4 场景2：两文共用删其一 → 文件保留；删其二 → 文件删", async () => {
+    const up = await req("/api/admin/upload", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: uploadForm({ bytes: minimalPng(), name: "shared.png", type: "image/png" }),
+    });
+    const { url } = (await up.json()) as { url: string };
+    uploadedUrls.push(url);
+
+    const idB = await createArticle("media-del-b", `![共享](${url})`);
+    const idC = await createArticle("media-del-c", `第二篇也用 ![共享](${url})`);
+
+    // 删第一篇：仍被第二篇引用 → 保留
+    const delB = await req(`/api/admin/posts/${idB}`, {
+      method: "DELETE",
+      headers: jsonHeaders(),
+    });
+    const delBBody = (await delB.json()) as {
+      mediaCleanup: { deleted: string[]; kept: number };
+    };
+    expect(delBBody.mediaCleanup.deleted).toEqual([]);
+    expect(delBBody.mediaCleanup.kept).toBe(1);
+    expect(fs.existsSync(diskPathOf(url))).toBe(true);
+
+    // 删第二篇：零引用 → 删盘
+    const delC = await req(`/api/admin/posts/${idC}`, {
+      method: "DELETE",
+      headers: jsonHeaders(),
+    });
+    const delCBody = (await delC.json()) as {
+      mediaCleanup: { deleted: string[]; kept: number };
+    };
+    expect(delCBody.mediaCleanup.deleted).toContain(url);
+    expect(fs.existsSync(diskPathOf(url))).toBe(false);
+  });
+
+  it("F4/E4 场景3：编辑保存把媒体从正文移除 → 文件不动（E3）", async () => {
+    const up = await req("/api/admin/upload", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: uploadForm({ bytes: minimalPng(), name: "edited.png", type: "image/png" }),
+    });
+    const { url } = (await up.json()) as { url: string };
+    uploadedUrls.push(url);
+
+    const id = await createArticle("media-edit-d", `![将被移除](${url})`);
+    const put = await req(`/api/admin/posts/${id}`, {
+      method: "PUT",
+      headers: jsonHeaders(),
+      body: JSON.stringify({
+        slug: "media-edit-d",
+        title: "媒体测试-media-edit-d",
+        status: "draft",
+        body: "媒体已被移除的正文",
+      }),
+    });
+    expect(put.status).toBe(200);
+    // E3：编辑移除不删文件（可能被草稿/版本历史引用）
+    expect(fs.existsSync(diskPathOf(url))).toBe(true);
+
+    // 媒体重新加回正文后再删文：该文当前引用 + 零其他引用 → 删盘
+    const putBack = await req(`/api/admin/posts/${id}`, {
+      method: "PUT",
+      headers: jsonHeaders(),
+      body: JSON.stringify({
+        slug: "media-edit-d",
+        title: "媒体测试-media-edit-d",
+        status: "draft",
+        body: `![重新加回](${url})`,
+      }),
+    });
+    expect(putBack.status).toBe(200);
+    expect(fs.existsSync(diskPathOf(url))).toBe(true);
+    await req(`/api/admin/posts/${id}`, { method: "DELETE", headers: jsonHeaders() });
+    expect(fs.existsSync(diskPathOf(url))).toBe(false);
+  });
+
+  it("F5 详情页 SSR：@video 渲染为 <video preload=none>（与预览共用配置）", async () => {
+    const up = await req("/api/admin/upload", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: uploadForm({ bytes: minimalWebm(), name: "render.webm", type: "video/webm" }),
+    });
+    const { url } = (await up.json()) as { url: string };
+    uploadedUrls.push(url);
+
+    const id = await createArticle("media-render-e", `开头\n\n@video[集成视频](${url})\n\n结尾`);
+    const publish = await req(`/api/admin/posts/${id}/publish`, {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: "{}",
+    });
+    expect(publish.status).toBe(200);
+
+    const page = await req("/posts/media-render-e");
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain("<video");
+    expect(html).toContain(`src="${url}"`);
+    expect(html).toMatch(/preload="none"/);
+    // @video 原始语法不直接出现在渲染结果里（已转为视频元素）
+    expect(html).not.toContain("@video[集成视频]");
+
+    // 收尾：删文（清理 uploads 文件）
+    const del = await req(`/api/admin/posts/${id}`, {
+      method: "DELETE",
+      headers: jsonHeaders(),
+    });
+    expect(del.status).toBe(200);
   });
 });
 

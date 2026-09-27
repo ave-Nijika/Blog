@@ -142,6 +142,7 @@ export async function DELETE(
         slug: result.slug,
         commitSha: result.commitSha,
         deletedArticleId: result.deletedArticleId,
+        mediaCleanup: result.mediaCleanup,
       }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );

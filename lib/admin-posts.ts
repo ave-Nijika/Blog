@@ -18,6 +18,9 @@ import { syncContent } from "@/lib/content-sync";
 import { commitFiles, removeFiles, GitCommitError } from "@/lib/content-git";
 import { getPostsDir } from "@/lib/content-paths";
 import { clearPostsCache } from "@/lib/content";
+import { extractAllUploadReferences } from "@/lib/media";
+import { deleteUploadFilesByUrls } from "@/lib/media-storage";
+import { AUDIT_ACTIONS, logAudit } from "@/lib/audit";
 import { revalidatePath } from "next/cache";
 
 export type PostStatus = "draft" | "public" | "private";
@@ -621,6 +624,69 @@ export interface DeletePostResult {
   slug: string;
   /** DeletedArticle 存档记录 id（审计用） */
   deletedArticleId: string;
+  /** E2 媒体清理结果：实际删除与保留（仍被其他文章引用）的 /uploads/ URL 数 */
+  mediaCleanup: { deleted: string[]; kept: number };
+}
+
+/**
+ * E2 媒体引用计数（M1-补丁1）：
+ *   - 扫描磁盘上其余全部文章 md（含草稿/私有，frontmatter cover 一并覆盖），
+ *     汇总仍被引用的 /uploads/ 文件；
+ *   - 被删文章引用的候选文件中，零引用才删盘，有引用的保留；
+ *   - E3：编辑保存移除媒体不删文件（本函数只在文章物理删除时调用）。
+ * 删除动作写审计日志（media.delete）。
+ */
+async function cleanupArticleUploads(
+  deletedSlug: string,
+  deletedRawMarkdown: string,
+  sessionId: string
+): Promise<{ deleted: string[]; kept: number }> {
+  const candidates = [...new Set(extractAllUploadReferences(deletedRawMarkdown))];
+  if (candidates.length === 0) return { deleted: [], kept: 0 };
+
+  const referencedElsewhere = new Set<string>();
+  let entries: string[] = [];
+  try {
+    entries = await fs.readdir(POSTS_DIR());
+  } catch {
+    // 目录不可读时保守处理：视为全部仍被引用，不删任何文件
+    return { deleted: [], kept: candidates.length };
+  }
+  for (const name of entries) {
+    if (!name.endsWith(".md") || name === `${deletedSlug}.md`) continue;
+    try {
+      const raw = await fs.readFile(path.join(POSTS_DIR(), name), "utf-8");
+      for (const url of extractAllUploadReferences(raw)) referencedElsewhere.add(url);
+    } catch {
+      // 单个文件读取失败按"仍有引用"处理（宁可保留不可误删）
+      continue;
+    }
+  }
+
+  const deletable = candidates.filter((url) => !referencedElsewhere.has(url));
+  let deleted: string[] = [];
+  if (deletable.length > 0) {
+    try {
+      deleted = await deleteUploadFilesByUrls(deletable);
+    } catch (error) {
+      // 文件清理失败不阻断文章删除（文章已删、文件残留只是占空间）
+      console.warn("[admin-posts] media cleanup failed:", error);
+      return { deleted: [], kept: candidates.length };
+    }
+  }
+  if (deleted.length > 0) {
+    await logAudit({
+      adminId: sessionId,
+      action: AUDIT_ACTIONS.MEDIA_DELETE,
+      targetType: "media",
+      targetId: deletedSlug,
+      metadata: {
+        deletedFiles: deleted,
+        keptFiles: candidates.length - deleted.length,
+      },
+    });
+  }
+  return { deleted, kept: candidates.length - deleted.length };
 }
 
 /**
@@ -635,8 +701,9 @@ export interface DeletePostResult {
  *      ArticleVersion/ArticleViewDedup）；
  *   4. 删除磁盘文件（ENOENT 吞掉，幂等）；
  *   5. git commit 删除记录（"nothing to commit" 吞掉——文件此前已删的场景）；
- *   6. syncAfterChange()（磁盘已无文件，同步引擎不会重建，也不会再"归档"）；
- *   7. 审计由 API 路由完成（POST_DELETE，附 deletedArticleId）。
+ *   6. E2 媒体清理：被删文章引用的 uploads 文件按引用计数删盘；
+ *   7. syncAfterChange()（磁盘已无文件，同步引擎不会重建，也不会再"归档"）；
+ *   8. 审计由 API 路由完成（POST_DELETE，附 deletedArticleId）。
  */
 export async function deletePost(
   id: string,
@@ -760,11 +827,22 @@ export async function deletePost(
     }
   }
 
+  const mediaCleanup = await cleanupArticleUploads(
+    existing.slug,
+    rawMarkdown,
+    sessionId
+  );
+
   await syncAfterChange();
 
   clearPostsCache();
   revalidatePostPaths(existing.slug);
-  return { commitSha, slug: existing.slug, deletedArticleId: archived.id };
+  return {
+    commitSha,
+    slug: existing.slug,
+    deletedArticleId: archived.id,
+    mediaCleanup,
+  };
 }
 
 async function loadRecord(id: string): Promise<AdminPostRecord | null> {
