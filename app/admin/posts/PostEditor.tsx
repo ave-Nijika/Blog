@@ -11,16 +11,35 @@
  *   - 保存草稿 → status=draft，写入
  *   - 发布 → status=public，写入
  *   - 改为私有 → status=private，写入
- *   - 预览切换：在编辑器右侧/下方展开 react-markdown 渲染
+ *   - 预览切换：在编辑器右侧/下方展开 react-markdown 渲染（与文章详情页共用
+ *     lib/markdown-components.tsx 渲染配置，M1-补丁1 C1）
+ *   - 媒体（M1-补丁1 B/D）：工具栏图片/视频按钮、textarea 粘贴/拖拽上传
+ *     （POST /api/admin/upload），在光标/落点处插入媒体块（前后各空一行）；
+ *     侧边媒体面板按文档顺序列出媒体块，HTML5 拖拽整块移动、✕ 从正文移除
+ *     （只动正文不动服务器文件，文件清理由删文时的引用计数统一负责）
  *   - 校验：title 非空、slug 合法、status 合法由服务端最终把关
  */
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
 import { fetchWithCsrf } from "@/lib/fetchWithCsrf";
+import { getMarkdownComponents } from "@/lib/markdown-components";
+import {
+  altFromFileName,
+  buildMediaSnippet,
+  fileExtensionOf,
+  findMediaBlocks,
+  insertMediaAt,
+  mediaKindByExtension,
+  moveMediaBlockAt,
+  removeMediaBlockAt,
+  renderVideoSyntax,
+  type MediaBlockInfo,
+  type MediaKind,
+} from "@/lib/media";
 
 export type PostFormValues = {
   id?: string;
@@ -62,6 +81,37 @@ function fromInputDateTime(local: string): string | null {
   return d.toISOString();
 }
 
+/**
+ * B3：估算文件拖落的正文落点——caretRangeFromPoint/caretPositionFromPoint
+ * 对 <textarea> 会返回文本偏移；拿不到则回退当前光标位置。
+ */
+function caretIndexFromDropEvent(
+  view: { document?: Document } | null | undefined,
+  textarea: HTMLTextAreaElement | null,
+  x: number,
+  y: number
+): number | null {
+  const doc = (view?.document ?? document) as Document & {
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+    caretPositionFromPoint?: (
+      x: number,
+      y: number
+    ) => { offsetNode: Node; offset: number } | null;
+  };
+  try {
+    if (typeof doc.caretRangeFromPoint === "function") {
+      const range = doc.caretRangeFromPoint(x, y);
+      if (range && range.startContainer === textarea) return range.startOffset;
+    } else if (typeof doc.caretPositionFromPoint === "function") {
+      const pos = doc.caretPositionFromPoint(x, y);
+      if (pos && pos.offsetNode === textarea) return pos.offset;
+    }
+  } catch {
+    /* 回退光标位置 */
+  }
+  return null;
+}
+
 export function PostEditor({ initial, mode }: Props) {
   const router = useRouter();
   const [values, setValues] = useState<PostFormValues>(initial);
@@ -71,6 +121,45 @@ export function PostEditor({ initial, mode }: Props) {
   const [showPreview, setShowPreview] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, startDelete] = useTransition();
+
+  // ---- 媒体上传状态（M1-补丁1 B）----
+  const bodyRef = useRef<HTMLTextAreaElement | null>(null);
+  // 正文 ref 镜像：上传是异步的，插入时以最新正文为基（用户上传期间输入不丢失）
+  const bodyTextRef = useRef<string>(initial.body);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const videoInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploadingKind, setUploadingKind] = useState<MediaKind | "multi" | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  // 插入完成后把光标恢复到媒体块之后（body 变化的 effect 里消费）
+  const restoreCursorRef = useRef<number | null>(null);
+  const uploadErrorTimerRef = useRef<number | null>(null);
+
+  const showUploadError = (message: string) => {
+    setUploadError(message);
+    if (uploadErrorTimerRef.current) window.clearTimeout(uploadErrorTimerRef.current);
+    uploadErrorTimerRef.current = window.setTimeout(() => setUploadError(null), 6000);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (uploadErrorTimerRef.current) window.clearTimeout(uploadErrorTimerRef.current);
+    };
+  }, []);
+
+  // body 变化后恢复光标到刚插入的媒体块之后
+  useEffect(() => {
+    if (restoreCursorRef.current == null) return;
+    const pos = restoreCursorRef.current;
+    restoreCursorRef.current = null;
+    const el = bodyRef.current;
+    if (el) {
+      el.focus();
+      el.setSelectionRange(pos, pos);
+    }
+  }, [values.body]);
+
+  // D1：媒体面板数据（按文档顺序；无媒体时面板隐藏）
+  const mediaBlocks = useMemo(() => findMediaBlocks(values.body), [values.body]);
 
   // 预置分类/标签（含自定义与文章聚合项，见 /api/admin/taxonomy）。
   // 拉取失败不影响编辑器：快捷选择只是增强，输入框始终可用。
@@ -113,7 +202,92 @@ export function PostEditor({ initial, mode }: Props) {
   }
 
   function update<K extends keyof PostFormValues>(key: K, value: PostFormValues[K]) {
+    if (key === "body") bodyTextRef.current = value as string;
     setValues((prev) => ({ ...prev, [key]: value }));
+  }
+
+  /**
+   * B1/B2/B3：顺序上传文件并在指定正文位置依次插入媒体块。
+   * 多文件时逐个插入，后一个文件接在前一个媒体块之后。
+   * 基于正文的 ref 镜像（bodyTextRef）做插入：上传耗时期间用户继续输入的
+   * 内容不会被闭包里的旧正文覆盖。
+   */
+  async function uploadFilesAndInsert(files: File[], position: number) {
+    if (files.length === 0) return;
+    if (uploadingKind !== null) {
+      showUploadError("已有上传在进行中，请等它完成后再试");
+      return;
+    }
+    setError(null);
+    setUploadingKind(files.length > 1 ? "multi" : (mediaKindByExtension(fileExtensionOf(files[0]?.name ?? "")) ?? "image"));
+
+    let pos = Math.max(0, Math.min(position, bodyTextRef.current.length));
+
+    for (const file of files) {
+      const ext = fileExtensionOf(file.name || "");
+      const kind = mediaKindByExtension(ext);
+      if (!kind) {
+        showUploadError(`「${file.name || "未命名文件"}」：不支持的文件类型（图片 jpg/png/gif/webp，视频 mp4/webm）`);
+        continue;
+      }
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const res = await fetchWithCsrf("/api/admin/upload", {
+          method: "POST",
+          body: form,
+        });
+        const data = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          url?: string;
+          error?: string;
+        };
+        if (!res.ok || !data.ok || !data.url) {
+          showUploadError(`「${file.name}」上传失败：${data.error || `HTTP ${res.status}`}`);
+          continue;
+        }
+        // B5：alt 默认取文件名去扩展名
+        const snippet = buildMediaSnippet(kind, altFromFileName(file.name || ""), data.url);
+        const next = insertMediaAt(bodyTextRef.current, Math.min(pos, bodyTextRef.current.length), snippet);
+        pos = next.indexOf(snippet) + snippet.length;
+        bodyTextRef.current = next;
+        restoreCursorRef.current = pos;
+        update("body", next);
+      } catch {
+        showUploadError(`「${file.name}」上传失败：网络异常，请重试`);
+      }
+    }
+
+    setUploadingKind(null);
+  }
+
+  function onPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    // B2：含文件时接管粘贴并上传；纯文本粘贴行为完全不变
+    const files = Array.from(e.clipboardData?.files ?? []);
+    if (files.length === 0) return;
+    e.preventDefault();
+    const pos = e.currentTarget.selectionStart ?? values.body.length;
+    void uploadFilesAndInsert(files, pos);
+  }
+
+  function onDragOver(e: React.DragEvent<HTMLTextAreaElement>) {
+    if (Array.from(e.dataTransfer?.types ?? []).includes("Files")) {
+      e.preventDefault(); // 允许文件拖放（B3）；文本拖拽不拦截
+    }
+  }
+
+  function onDrop(e: React.DragEvent<HTMLTextAreaElement>) {
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (files.length === 0) return;
+    e.preventDefault();
+    const estimated = caretIndexFromDropEvent(
+      e.view,
+      e.currentTarget,
+      e.clientX,
+      e.clientY
+    );
+    const pos = estimated ?? e.currentTarget.selectionStart ?? values.body.length;
+    void uploadFilesAndInsert(files, pos);
   }
 
   function buildPayload(targetStatus: "draft" | "public" | "private") {
@@ -221,6 +395,8 @@ export function PostEditor({ initial, mode }: Props) {
 
   const isPublic = values.status === "public";
   const isDraft = values.status === "draft";
+  const uploadDisabled = uploadingKind !== null;
+  const markdownComponents = useMemo(() => getMarkdownComponents(), []);
 
   return (
     <div className="flex flex-col gap-4">
@@ -403,14 +579,86 @@ export function PostEditor({ initial, mode }: Props) {
       </div>
 
       <div className={showPreview ? "grid gap-4 lg:grid-cols-2" : ""}>
-        <Field label="正文（Markdown）" full>
+        {/* 正文列：不用 <label> 包裹（内部有按钮/面板，避免误聚焦 textarea） */}
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
+              正文（Markdown）
+              <span className="ml-2 font-normal text-xs text-slate-400 dark:text-slate-500">
+                支持粘贴 / 拖入图片视频直接上传
+              </span>
+            </span>
+            {/* B1：工具栏图片/视频按钮（B4 loading 态） */}
+            <div className="flex gap-1.5">
+              <button
+                type="button"
+                onClick={() => imageInputRef.current?.click()}
+                disabled={uploadDisabled}
+                className="rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:border-sky-400 hover:text-sky-600 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-sky-500 dark:hover:text-sky-400"
+              >
+                {uploadingKind === "image" ? "上传中…" : "🖼 图片"}
+              </button>
+              <button
+                type="button"
+                onClick={() => videoInputRef.current?.click()}
+                disabled={uploadDisabled}
+                className="rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:border-sky-400 hover:text-sky-600 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-sky-500 dark:hover:text-sky-400"
+              >
+                {uploadingKind === "video" ? "上传中…" : "🎬 视频"}
+              </button>
+            </div>
+          </div>
+
           <textarea
+            id="post-body-textarea"
+            ref={bodyRef}
             value={values.body}
             onChange={(e) => update("body", e.target.value)}
+            onPaste={onPaste}
+            onDragOver={onDragOver}
+            onDrop={onDrop}
             rows={showPreview ? 18 : 24}
             className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-sm shadow-sm focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
           />
-        </Field>
+
+          {/* B4：上传失败反馈（不静默失败） */}
+          {uploadError ? (
+            <div
+              role="alert"
+              className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/40 dark:text-amber-200"
+            >
+              {uploadError}
+            </div>
+          ) : null}
+
+          {/* B5/D：隐藏的文件选择入口 */}
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              const files = Array.from(e.target.files ?? []);
+              const pos = bodyRef.current?.selectionStart ?? values.body.length;
+              e.target.value = ""; // 允许重复选择同一文件
+              void uploadFilesAndInsert(files, pos);
+            }}
+          />
+          <input
+            ref={videoInputRef}
+            type="file"
+            accept="video/mp4,video/webm,.mp4,.webm"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              const files = Array.from(e.target.files ?? []);
+              const pos = bodyRef.current?.selectionStart ?? values.body.length;
+              e.target.value = "";
+              void uploadFilesAndInsert(files, pos);
+            }}
+          />
+        </div>
         {showPreview ? (
           <Field label="预览" full>
             <div className="prose-content min-h-[24rem] rounded-md border border-slate-200 bg-white/70 p-4 dark:border-slate-800 dark:bg-slate-900/40">
@@ -418,8 +666,9 @@ export function PostEditor({ initial, mode }: Props) {
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   rehypePlugins={[rehypeHighlight]}
+                  components={markdownComponents}
                 >
-                  {values.body}
+                  {renderVideoSyntax(values.body)}
                 </ReactMarkdown>
               ) : (
                 <p className="text-sm text-slate-400 dark:text-slate-500">暂无内容可预览</p>
@@ -428,6 +677,126 @@ export function PostEditor({ initial, mode }: Props) {
           </Field>
         ) : null}
       </div>
+
+      {/* D：媒体面板（按文档顺序；无媒体时隐藏） */}
+      {mediaBlocks.length > 0 ? (
+        <MediaPanel
+          items={mediaBlocks}
+          onMove={(from, to) => update("body", moveMediaBlockAt(values.body, from, to))}
+          onRemove={(index) => update("body", removeMediaBlockAt(values.body, index))}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * D：媒体面板——列出正文中的媒体块（缩略图/图标 + alt），HTML5 draggable
+ * 拖拽整块移动（指示线 = 被拖块将成为的位置），✕ 把该块从正文移除。
+ * 正文变换全部委托 lib/media.ts 纯函数（其余内容零改动由单测保证）。
+ */
+function MediaPanel({
+  items,
+  onMove,
+  onRemove,
+}: {
+  items: MediaBlockInfo[];
+  onMove: (from: number, to: number) => void;
+  onRemove: (index: number) => void;
+}) {
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [overIndex, setOverIndex] = useState<number | null>(null);
+
+  const clearDrag = () => {
+    setDragIndex(null);
+    setOverIndex(null);
+  };
+
+  return (
+    <div className="ba-card p-4">
+      <div className="mb-2 flex items-center gap-2 text-sm">
+        <span className="ba-tri h-3 w-4" aria-hidden />
+        <span className="ba-font-round text-[color:rgb(var(--color-text-primary))] dark:text-slate-100">
+          媒体（{items.length}）
+        </span>
+        <span className="text-xs text-slate-400 dark:text-slate-500">
+          拖动条目调整在文中的位置；✕ 仅从正文移除，不删服务器文件
+        </span>
+      </div>
+      <ul className="flex flex-col">
+        {items.map((item, i) => {
+          const dragging = dragIndex === i;
+          // 指示线：悬停条目上方 = 被拖块将移动到该位置（与 moveMediaBlockAt 语义一致）
+          const indicator =
+            dragIndex !== null && overIndex === i && dragIndex !== i;
+          return (
+            <li
+              key={`${item.url}-${item.startLine}`}
+              draggable
+              onDragStart={(e) => {
+                setDragIndex(i);
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData("text/plain", String(i));
+              }}
+              onDragEnd={clearDrag}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                setOverIndex(i);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (dragIndex !== null && dragIndex !== i) onMove(dragIndex, i);
+                clearDrag();
+              }}
+              className={`flex items-center gap-3 rounded-md border px-3 py-2 text-sm transition-colors ${
+                dragging
+                  ? "border-sky-400 bg-sky-50 opacity-60 dark:border-sky-600 dark:bg-sky-950/40"
+                  : "border-transparent"
+              } ${indicator ? "border-t-2 border-t-sky-500" : ""} cursor-grab active:cursor-grabbing`}
+            >
+              <span
+                className="select-none text-xs text-slate-400 dark:text-slate-500"
+                aria-hidden
+              >
+                ⠿
+              </span>
+              {item.kind === "image" ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={item.url}
+                  alt=""
+                  loading="lazy"
+                  className="h-10 w-16 shrink-0 rounded border border-slate-200 object-cover dark:border-slate-700"
+                />
+              ) : (
+                <span
+                  aria-hidden
+                  className="flex h-10 w-16 shrink-0 items-center justify-center rounded border border-slate-200 bg-slate-50 text-lg dark:border-slate-700 dark:bg-slate-800"
+                >
+                  🎬
+                </span>
+              )}
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-slate-700 dark:text-slate-200">
+                  {item.alt || item.url.split("/").pop()}
+                </span>
+                <span className="block truncate text-xs text-slate-400 dark:text-slate-500">
+                  {item.kind === "image" ? "图片" : "视频"} · {item.url}
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={() => onRemove(i)}
+                aria-label={`从正文移除媒体 ${item.alt || item.url}`}
+                className="shrink-0 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-500 transition-colors hover:border-rose-300 hover:text-rose-600 dark:border-slate-700 dark:text-slate-400 dark:hover:border-rose-800 dark:hover:text-rose-400"
+              >
+                ✕
+              </button>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
@@ -491,5 +860,3 @@ function PresetChip({
     </button>
   );
 }
-
-export {};
