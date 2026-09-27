@@ -9,6 +9,8 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
 import { estimateReadingTime, getPostBySlug } from "@/lib/content";
+import { getMarkdownComponents } from "@/lib/markdown-components";
+import { renderVideoSyntax } from "@/lib/media";
 import {
   getPublicArticleBySlug,
   getPublicArticleSlugs,
@@ -24,7 +26,6 @@ import { DEFAULT_LOCALE } from "@/lib/i18n/config";
 import { zh } from "@/lib/i18n/zh";
 import { en } from "@/lib/i18n/en";
 import { CommentSection } from "@/components/CommentSection";
-import { CodeBlock } from "@/components/CodeBlock";
 import { LocaleDate } from "@/components/LocaleDate";
 import { Reveal } from "@/components/Reveal";
 
@@ -159,18 +160,15 @@ export default async function PostPage({
         </header>
 
         <div className="prose-content mt-8">
+          {/* M1-补丁1：渲染配置抽到 lib/markdown-components.tsx 与编辑页预览共享
+              （一次修改两处生效）；正文先经 renderVideoSyntax 预处理 @video 语法。
+              CodeBlock 仅详情页启用（enhanceCodeBlock: true，保持现状语义）。 */}
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[rehypeHighlight]}
-            components={{
-              // 代码块增强（悬停复制/展开、触屏长按复制）——仅文章详情页启用，
-              // 编辑页预览不受影响；node prop 不可跨 RSC 序列化，不下传
-              pre: ({ children, className }) => (
-                <CodeBlock className={className}>{children}</CodeBlock>
-              ),
-            }}
+            components={getMarkdownComponents({ enhanceCodeBlock: true })}
           >
-            {body.content}
+            {renderVideoSyntax(body.content)}
           </ReactMarkdown>
         </div>
 

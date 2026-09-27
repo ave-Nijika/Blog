@@ -1695,6 +1695,15 @@ a.ba-category-chip-active:hover {
   box-shadow: var(--shadow-md);
 }
 
+/* 正文视频（M1-补丁1）：宽度约束不破版，移动端同样收敛在内容宽度内 */
+.prose-content video {
+  max-width: 100%;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
 /* ============================================
    八、路由切换进度条（保留）
    ============================================ */

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
 /**
  * 图片并发限制器（模块级，跨组件共享）。
@@ -38,6 +38,13 @@ interface LazyImageProps {
   alt: string;
   className?: string;
   onClick?: () => void;
+  /**
+   * 行内模式（M1-补丁1）：根节点与骨架占位改用 <span>（display:block）。
+   * 正文 markdown 的图片常位于 <p> 段落内部，块级 <div> 进 <p> 会被浏览器
+   * HTML 解析器强制断开，造成 hydration mismatch——服务端渲染的内容不受
+   * 客户端重渲染影响但结构必须合法。默认 false，瀑布墙等既有用法零影响。
+   */
+  inline?: boolean;
 }
 
 /**
@@ -45,10 +52,10 @@ interface LazyImageProps {
  * 仅用于列表/瀑布墙等非首屏图片；用户主动点击（灯箱）不受限流。
  * 卸载时若仍占着槽位则归还，避免槽位泄漏。
  */
-export function BaLazyImage({ src, alt, className, onClick }: LazyImageProps) {
+export function BaLazyImage({ src, alt, className, onClick, inline = false }: LazyImageProps) {
   const [shouldLoad, setShouldLoad] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const holder = useRef<HTMLDivElement>(null);
+  const holder = useRef<HTMLDivElement | HTMLSpanElement>(null);
   const releaseRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -82,10 +89,11 @@ export function BaLazyImage({ src, alt, className, onClick }: LazyImageProps) {
     releaseRef.current = null;
   };
 
-  return (
-    <div ref={holder} className="relative h-full w-full">
+  // span 进 <p> 合法（phrasing content）；display:block 保持块状占位表现
+  const content: ReactNode = (
+    <>
       {!loaded && (
-        <div
+        <span
           className="absolute inset-0 animate-pulse bg-[color:rgb(var(--ba-primary-soft))] dark:bg-slate-800"
           aria-hidden
         />
@@ -116,6 +124,19 @@ export function BaLazyImage({ src, alt, className, onClick }: LazyImageProps) {
           className="absolute inset-0 h-full w-full cursor-pointer"
         />
       )}
+    </>
+  );
+
+  if (inline) {
+    return (
+      <span ref={holder as RefObject<HTMLSpanElement>} className="relative block">
+        {content}
+      </span>
+    );
+  }
+  return (
+    <div ref={holder as RefObject<HTMLDivElement>} className="relative h-full w-full">
+      {content}
     </div>
   );
 }
