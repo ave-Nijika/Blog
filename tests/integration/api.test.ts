@@ -126,13 +126,88 @@ async function startServer(): Promise<void> {
   throw new Error("dev server failed to start in time");
 }
 
+// 集成测试夹具（自包含，不依赖仓库 content/posts——主人要求站点不放预置文章）。
+// 与历史夹具同名同要点：公开文两篇（含正文关键词，供搜索/片段框用例命中）+ 草稿一篇。
+const FIXTURE_POSTS: Record<string, string> = {
+  "hello-world.md": `---
+title: 我的第一篇学习笔记
+slug: hello-world
+summary: 集成测试夹具：学习笔记开篇
+status: public
+category: 生活
+tags:
+  - 随笔
+  - 学习
+pinned: false
+publishedAt: 2026-01-01T00:00:00.000Z
+---
+
+# 我的第一篇学习笔记
+
+你好，世界。这是一篇用于集成测试的公开文章。
+
+\`\`\`js
+function greet(name) {
+  return \`你好，\${name}\`;
+}
+\`\`\`
+
+正文到此结束。
+`,
+  "algorithm-notes.md": `---
+title: 算法学习笔记：二分查找
+slug: algorithm-notes
+summary: 集成测试夹具：二分查找
+status: public
+category: 技术
+tags:
+  - 算法
+pinned: false
+publishedAt: 2026-01-02T00:00:00.000Z
+---
+
+# 算法学习笔记：二分查找
+
+二分查找的前提是数组有序，每次把搜索区间折半。
+
+\`\`\`python
+def binary_search(arr, target):
+    lo, hi = 0, len(arr) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if arr[mid] == target:
+            return mid
+        if arr[mid] < target:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return -1
+\`\`\`
+`,
+  "draft-post.md": `---
+title: 草稿：尚未发布的笔记
+slug: draft-post
+summary: 集成测试夹具：草稿
+status: draft
+category: 生活
+tags: []
+pinned: false
+publishedAt: null
+---
+
+# 草稿
+
+这篇文章还是草稿，不应出现在任何公开入口。
+`,
+};
+
 beforeAll(async () => {
-  // 1. 临时内容 git 仓库（拷贝真实种子文章）
+  // 1. 临时内容 git 仓库（测试自播种夹具，见 FIXTURE_POSTS）
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "blog-integration-"));
   const postsDir = path.join(tmpRoot, "content", "posts");
   fs.mkdirSync(postsDir, { recursive: true });
-  for (const f of fs.readdirSync("content/posts")) {
-    if (f.endsWith(".md")) fs.copyFileSync(path.join("content/posts", f), path.join(postsDir, f));
+  for (const [name, raw] of Object.entries(FIXTURE_POSTS)) {
+    fs.writeFileSync(path.join(postsDir, name), raw, "utf-8");
   }
   const git = (args: string) => execSync(`git ${args}`, { cwd: tmpRoot, stdio: "ignore" });
   git("init -q -b main");
