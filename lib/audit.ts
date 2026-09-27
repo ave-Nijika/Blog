@@ -24,7 +24,8 @@ export type AuditTargetType =
   | "captcha"
   | "session"
   | "llm"
-  | "comfy_item";
+  | "comfy_item"
+  | "media";
 
 const TARGET_TYPE_SET = new Set<AuditTargetType>([
   "auth",
@@ -37,6 +38,7 @@ const TARGET_TYPE_SET = new Set<AuditTargetType>([
   "session",
   "llm",
   "comfy_item",
+  "media",
 ]);
 
 const SENSITIVE_KEYS = [
@@ -265,6 +267,8 @@ export const AUDIT_ACTIONS = {
   TAXONOMY_TAG_UPDATE: "taxonomy.tag.update",
   TAXONOMY_TAG_DELETE: "taxonomy.tag.delete",
   DELETED_COMMENT_DELETE: "deleted_comment.delete",
+  MEDIA_UPLOAD: "media.upload",
+  MEDIA_DELETE: "media.delete",
   CREATE: "create",
   DELETE: "delete",
 } as const;

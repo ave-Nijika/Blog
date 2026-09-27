@@ -23,6 +23,7 @@ const TARGET_TYPES = new Set([
   "session",
   "llm",
   "comfy_item", // ComfyUI 上传/删除审计
+  "media", // 文章媒体上传/删文清理审计（M1-补丁1）
 ]);
 
 function parseIntParam(value: string | null, fallback: number, max: number) {

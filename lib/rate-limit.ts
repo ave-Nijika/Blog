@@ -54,6 +54,7 @@ function envInt(name: string, fallback: number): number {
 // （同 lib/site-settings.ts 缓存槽的先例）。
 const globalForRateLimit = globalThis as unknown as {
   __searchRateBuckets?: Map<string, Bucket>;
+  __uploadRateBuckets?: Map<string, Bucket>;
 };
 export const searchBuckets: Map<string, Bucket> =
   globalForRateLimit.__searchRateBuckets ?? new Map<string, Bucket>();
@@ -65,4 +66,17 @@ export function tryConsumeSearch(
   const max = envInt("SEARCH_RATE_LIMIT_MAX_ATTEMPTS", 30);
   const windowMs = envInt("SEARCH_RATE_LIMIT_WINDOW_SECONDS", 60) * 1000;
   return consume(searchBuckets, `search:${ip}`, max, windowMs, Date.now());
+}
+
+// 上传限流（M1-补丁1 A7）：上传涉及大文件落盘，桶同样挂 globalThis。
+export const uploadBuckets: Map<string, Bucket> =
+  globalForRateLimit.__uploadRateBuckets ?? new Map<string, Bucket>();
+globalForRateLimit.__uploadRateBuckets = uploadBuckets;
+/** 上传限流入口：按客户端 IP，默认 10 次/60 秒，可用 env 覆盖。 */
+export function tryConsumeUpload(
+  ip: string
+): { allowed: boolean; retryAfterSec: number } {
+  const max = envInt("UPLOAD_RATE_LIMIT_MAX_ATTEMPTS", 10);
+  const windowMs = envInt("UPLOAD_RATE_LIMIT_WINDOW_SECONDS", 60) * 1000;
+  return consume(uploadBuckets, `upload:${ip}`, max, windowMs, Date.now());
 }
