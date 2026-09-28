@@ -13,6 +13,7 @@
 import { NextRequest } from "next/server";
 import { requireAdminApi, getSession } from "@/lib/auth";
 import { verifyCsrfToken } from "@/lib/csrf";
+import { db } from "@/lib/db";
 import { buildUploadReferenceIndex } from "@/lib/media-references";
 import { deleteUploadFilesByUrls, parseUploadsUrl } from "@/lib/media-storage";
 import { AUDIT_ACTIONS, logAudit } from "@/lib/audit";
@@ -47,13 +48,26 @@ export async function DELETE(req: NextRequest) {
   if (typeof url !== "string" || !url) {
     return jsonResponse({ error: "缺少 url" }, 400);
   }
+  // M2-补丁1 B2：可选 excludeArticleId——引用计数排除该文章自身磁盘 md 的
+  // 引用（编辑中的文章自带引用不应阻止删除；面板与浮动菜单都传当前文章 id）。
+  // 不传时行为与 M1-补丁2 完全一致（删文清理、孤儿 purge 走各自路径零变化）。
+  const excludeArticleId = (payload as { excludeArticleId?: unknown } | null)
+    ?.excludeArticleId;
+  let excludeSlug: string | undefined;
+  if (typeof excludeArticleId === "string" && excludeArticleId) {
+    const article = await db.article.findUnique({
+      where: { id: excludeArticleId },
+      select: { slug: true },
+    });
+    excludeSlug = article?.slug ?? undefined;
+  }
   // comfy 隔离：parseUploadsUrl 只认 /uploads/{images|videos}/，其余一律 400
   const parsed = parseUploadsUrl(url);
   if (!parsed) {
     return jsonResponse({ error: "仅支持删除站内图片/视频（/uploads/images|videos/）" }, 400);
   }
 
-  const index = await buildUploadReferenceIndex();
+  const index = await buildUploadReferenceIndex({ excludeSlug });
   if (!index) {
     // 引用状态未知时绝不删（宁可保留不误删）
     return jsonResponse({ error: "引用统计暂时不可用，已拒绝删除" }, 500);
@@ -63,7 +77,9 @@ export async function DELETE(req: NextRequest) {
     return jsonResponse(
       {
         ok: false,
-        error: `该文件仍被 ${refCount} 处文章内容引用，无法删除`,
+        error: excludeSlug
+          ? `该文件仍被其他 ${refCount} 处文章内容引用，无法删除`
+          : `该文件仍被 ${refCount} 处文章内容引用，无法删除`,
         referencedBy: refCount,
       },
       409
@@ -78,7 +94,12 @@ export async function DELETE(req: NextRequest) {
       action: AUDIT_ACTIONS.MEDIA_DELETE,
       targetType: "media",
       targetId: url,
-      metadata: { url, source: "panel", removed: removed.length > 0 },
+      metadata: {
+        url,
+        source: "panel",
+        removed: removed.length > 0,
+        ...(excludeSlug ? { excludedArticle: excludeSlug } : {}),
+      },
     });
     return jsonResponse({ ok: true, url, removed: removed.length > 0 }, 200);
   } catch (error) {

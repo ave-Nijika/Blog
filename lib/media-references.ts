@@ -18,8 +18,15 @@ import { extractAllUploadReferences } from "@/lib/media";
 /**
  * 扫描磁盘全部文章 md，返回 uploads URL → 引用次数 的索引。
  * 返回 null 表示文章目录不可读（无法给出任何"零引用"结论）。
+ *
+ * excludeSlug（M2-补丁1 B2）：排除 `<slug>.md` 自身的引用——媒体面板/
+ * 浮动菜单"彻底删除"时传入正在编辑的文章（其磁盘 md 里的引用不该阻止
+ * 删除，否则"图在文档里就永远删不掉"）。不传时行为与 M1-补丁1/2 完全
+ * 一致（删文清理、孤儿巡检）。
  */
-export async function buildUploadReferenceIndex(): Promise<Map<string, number> | null> {
+export async function buildUploadReferenceIndex(
+  opts: { excludeSlug?: string } = {}
+): Promise<Map<string, number> | null> {
   const dir = getPostsDir();
   let names: string[];
   try {
@@ -27,9 +34,11 @@ export async function buildUploadReferenceIndex(): Promise<Map<string, number> |
   } catch {
     return null;
   }
+  const excludeFile = opts.excludeSlug ? `${opts.excludeSlug}.md` : null;
   const index = new Map<string, number>();
   for (const name of names) {
     if (!name.endsWith(".md")) continue;
+    if (excludeFile && name === excludeFile) continue;
     try {
       const raw = await fs.readFile(path.join(dir, name), "utf-8");
       for (const url of extractAllUploadReferences(raw)) {

@@ -1799,6 +1799,168 @@ describe("媒体删除闭环（M1-补丁2）", () => {
   });
 });
 
+describe("媒体删除排除自身（M2-补丁1 B2 删除语义修正）", () => {
+  const jsonHeaders = () => ({
+    "Content-Type": "application/json",
+    "X-CSRF-Token": csrfToken,
+  });
+  const createdArticleIds: string[] = [];
+
+  function minimalPng(): Buffer {
+    const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const ihdrData = Buffer.alloc(13, 0);
+    ihdrData.writeUInt32BE(1, 0);
+    ihdrData.writeUInt32BE(1, 4);
+    ihdrData[8] = 8;
+    ihdrData[9] = 2;
+    const ihdr = Buffer.concat([
+      Buffer.from([0, 0, 0, 13]),
+      Buffer.from("IHDR"),
+      ihdrData,
+      Buffer.from([0, 0, 0, 0]),
+    ]);
+    const iend = Buffer.concat([
+      Buffer.from([0, 0, 0, 0]),
+      Buffer.from("IEND"),
+      Buffer.from([0xae, 0x42, 0x60, 0x82]),
+    ]);
+    return Buffer.concat([sig, ihdr, iend]);
+  }
+
+  function diskPathOf(url: string): string {
+    return path.join(process.cwd(), "public", url);
+  }
+
+  async function uploadPng(): Promise<string> {
+    const form = new FormData();
+    form.append("file", new Blob([minimalPng()], { type: "image/png" }), "m2b2.png");
+    const res = await req("/api/admin/upload", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: form,
+    });
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { url: string }).url;
+  }
+
+  async function createArticleReferencing(slug: string, url: string): Promise<string> {
+    const res = await req("/api/admin/posts", {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({
+        slug,
+        title: `M2B2-${slug}`,
+        status: "draft",
+        category: "测试",
+        body: `![引用](${url})`,
+      }),
+    });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as { post: { id: string } };
+    createdArticleIds.push(created.post.id);
+    return created.post.id;
+  }
+
+  afterAll(async () => {
+    for (const id of createdArticleIds) {
+      await req(`/api/admin/posts/${id}`, {
+        method: "DELETE",
+        headers: jsonHeaders(),
+      }).catch(() => null);
+    }
+  });
+
+  it("B2 根因修复：排除自身引用后可删盘（旧语义 409 永远删不掉）", async () => {
+    const url = await uploadPng();
+    const articleId = await createArticleReferencing("m2b2-self", url);
+
+    // 旧语义回归对照：不带 excludeArticleId → 409（自身引用也算数）
+    const oldSemantics = await req("/api/admin/media", {
+      method: "DELETE",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ url }),
+    });
+    expect(oldSemantics.status).toBe(409);
+    expect(fs.existsSync(diskPathOf(url))).toBe(true);
+
+    // 新语义：排除自身 → 零引用（不含自身）→ 删盘；文章 md 里仍引用着
+    //（编辑器随后会把节点移出文档并保存——API 语义只负责文件层）
+    const del = await req("/api/admin/media", {
+      method: "DELETE",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ url, excludeArticleId: articleId }),
+    });
+    expect(del.status).toBe(200);
+    const delBody = (await del.json()) as { ok: boolean; removed: boolean };
+    expect(delBody.ok).toBe(true);
+    expect(delBody.removed).toBe(true);
+    expect(fs.existsSync(diskPathOf(url))).toBe(false);
+
+    // 收尾：删文（E2 清理对已删文件幂等）
+    await req(`/api/admin/posts/${articleId}`, {
+      method: "DELETE",
+      headers: jsonHeaders(),
+    });
+  });
+
+  it("B2 边界：其他文章仍引用 → 409 且引用数不含被排除文章", async () => {
+    const url = await uploadPng();
+    const idA = await createArticleReferencing("m2b2-pair-a", url);
+    const idB = await createArticleReferencing("m2b2-pair-b", url);
+
+    // 排除 A：B 仍引用 → 409 referencedBy=1（不含 A）
+    const delA = await req("/api/admin/media", {
+      method: "DELETE",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ url, excludeArticleId: idA }),
+    });
+    expect(delA.status).toBe(409);
+    const delABody = (await delA.json()) as { referencedBy: number };
+    expect(delABody.referencedBy).toBe(1);
+
+    // 排除 B：A 仍引用 → 409 referencedBy=1
+    const delB = await req("/api/admin/media", {
+      method: "DELETE",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ url, excludeArticleId: idB }),
+    });
+    expect(delB.status).toBe(409);
+    expect(((await delB.json()) as { referencedBy: number }).referencedBy).toBe(1);
+
+    // 删 B（E2：文件仍被 A 引用 → 保留），再排除 A 删除 → 成功
+    await req(`/api/admin/posts/${idB}`, { method: "DELETE", headers: jsonHeaders() });
+    expect(fs.existsSync(diskPathOf(url))).toBe(true);
+    const delFinal = await req("/api/admin/media", {
+      method: "DELETE",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ url, excludeArticleId: idA }),
+    });
+    expect(delFinal.status).toBe(200);
+    expect(fs.existsSync(diskPathOf(url))).toBe(false);
+  });
+
+  it("B2/B4：excludeArticleId 指向不存在的文章 → 按完整引用计数（新建文章场景安全）", async () => {
+    const url = await uploadPng();
+    const articleId = await createArticleReferencing("m2b2-ghost", url);
+
+    const del = await req("/api/admin/media", {
+      method: "DELETE",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ url, excludeArticleId: "nonexistent-id" }),
+    });
+    expect(del.status).toBe(409);
+    expect(((await del.json()) as { referencedBy: number }).referencedBy).toBe(1);
+    expect(fs.existsSync(diskPathOf(url))).toBe(true);
+
+    // 收尾
+    await req(`/api/admin/posts/${articleId}`, {
+      method: "DELETE",
+      headers: jsonHeaders(),
+    });
+    expect(fs.existsSync(diskPathOf(url))).toBe(false);
+  });
+});
+
 describe("改密后吊销会话（会破坏登录态，放最后段执行并恢复）", () => {
   it("改密后旧会话立即 401，新密码可登录，旧密码不可用", async () => {
     // 前置：此时 jar 已登录（前面 describe 已建好登录态 + csrfToken）
