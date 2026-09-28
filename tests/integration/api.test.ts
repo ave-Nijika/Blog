@@ -1456,6 +1456,349 @@ describe("媒体上传与删除联动（M1-补丁1）", () => {
   });
 });
 
+describe("媒体删除闭环（M1-补丁2）", () => {
+  const jsonHeaders = () => ({
+    "Content-Type": "application/json",
+    "X-CSRF-Token": csrfToken,
+  });
+  /** 测试直接/间接创建的磁盘文件，afterAll 尽力清理 */
+  const leftoverPaths: string[] = [];
+  const createdArticleIds: string[] = [];
+
+  function minimalPng(): Buffer {
+    const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const ihdrData = Buffer.alloc(13, 0);
+    ihdrData.writeUInt32BE(1, 0);
+    ihdrData.writeUInt32BE(1, 4);
+    ihdrData[8] = 8;
+    ihdrData[9] = 2;
+    const ihdr = Buffer.concat([
+      Buffer.from([0, 0, 0, 13]),
+      Buffer.from("IHDR"),
+      ihdrData,
+      Buffer.from([0, 0, 0, 0]),
+    ]);
+    const iend = Buffer.concat([
+      Buffer.from([0, 0, 0, 0]),
+      Buffer.from("IEND"),
+      Buffer.from([0xae, 0x42, 0x60, 0x82]),
+    ]);
+    return Buffer.concat([sig, ihdr, iend]);
+  }
+
+  function minimalWebm(): Buffer {
+    return Buffer.concat([
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
+      Buffer.alloc(48, 0x42),
+    ]);
+  }
+
+  function uploadForm(bytes: Buffer, name: string, type: string): FormData {
+    const form = new FormData();
+    form.append("file", new Blob([bytes], { type }), name);
+    return form;
+  }
+
+  function diskPathOf(url: string): string {
+    // 测试环境未设 UPLOAD_DIR/MEDIA_UPLOADS_DIR → 存储根回退 cwd/public/uploads
+    return path.join(process.cwd(), "public", url);
+  }
+
+  async function uploadPng(): Promise<string> {
+    const res = await req("/api/admin/upload", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: uploadForm(minimalPng(), "patch2.png", "image/png"),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { url: string };
+    return body.url;
+  }
+
+  async function createArticleReferencing(slug: string, url: string): Promise<string> {
+    const res = await req("/api/admin/posts", {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({
+        slug,
+        title: `媒体删除闭环-${slug}`,
+        status: "draft",
+        category: "测试",
+        body: `![引用](${url})`,
+      }),
+    });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as { post: { id: string } };
+    createdArticleIds.push(created.post.id);
+    return created.post.id;
+  }
+
+  async function deleteArticle(id: string): Promise<void> {
+    const res = await req(`/api/admin/posts/${id}`, {
+      method: "DELETE",
+      headers: jsonHeaders(),
+    });
+    expect(res.status).toBe(200);
+  }
+
+  afterAll(async () => {
+    // 兜底清理：正常路径各用例已自清；这里兜住失败分支遗留
+    for (const id of createdArticleIds) {
+      await req(`/api/admin/posts/${id}`, {
+        method: "DELETE",
+        headers: jsonHeaders(),
+      }).catch(() => null);
+    }
+    for (const p of leftoverPaths) {
+      try {
+        fs.rmSync(p, { force: true });
+      } catch {
+        /* best effort */
+      }
+    }
+  });
+
+  it("D5 鉴权：未登录 DELETE/orphans/purge 一律 401；登录后无 CSRF 写操作 403", async () => {
+    expect(
+      (
+        await req("/api/admin/media", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: "/uploads/images/x.png" }),
+        }, { useJar: false })
+      ).status
+    ).toBe(401);
+    expect(
+      (await req("/api/admin/media/orphans", {}, { useJar: false })).status
+    ).toBe(401);
+    expect(
+      (
+        await req("/api/admin/media/orphans/purge", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ urls: ["/uploads/images/x.png"] }),
+        }, { useJar: false })
+      ).status
+    ).toBe(401);
+    // 登录态、无 CSRF 头 → 403（双写端点）
+    const noCsrfDelete = await req("/api/admin/media", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "/uploads/images/x.png" }),
+    });
+    expect(noCsrfDelete.status).toBe(403);
+    const noCsrfPurge = await req("/api/admin/media/orphans/purge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ urls: ["/uploads/images/x.png"] }),
+    });
+    expect(noCsrfPurge.status).toBe(403);
+  });
+
+  it("comfy 隔离：DELETE/purge 请求 /uploads/comfy/** 路径 → 400，绝不处理", async () => {
+    const comfyUrl = "/uploads/comfy/integration-comfy-file.json";
+    const del = await req("/api/admin/media", {
+      method: "DELETE",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ url: comfyUrl }),
+    });
+    expect(del.status).toBe(400);
+    const purge = await req("/api/admin/media/orphans/purge", {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ urls: [comfyUrl] }),
+    });
+    expect(purge.status).toBe(400);
+    // 混入一个合法 + 一个 comfy 路径 → 整个请求 fail-closed 400
+    const mixed = await req("/api/admin/media/orphans/purge", {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ urls: ["/uploads/images/whatever.png", comfyUrl] }),
+    });
+    expect(mixed.status).toBe(400);
+  });
+
+  it("D1 零引用彻底删除：200 + 落盘消失 + 审计 source=panel", async () => {
+    const url = await uploadPng();
+    expect(fs.existsSync(diskPathOf(url))).toBe(true);
+
+    const del = await req("/api/admin/media", {
+      method: "DELETE",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ url }),
+    });
+    expect(del.status).toBe(200);
+    const delBody = (await del.json()) as { ok: boolean; removed: boolean };
+    expect(delBody.ok).toBe(true);
+    expect(delBody.removed).toBe(true);
+    expect(fs.existsSync(diskPathOf(url))).toBe(false);
+
+    // 审计：media.delete 且 source=panel
+    const logs = (await (
+      await req("/api/admin/audit-logs?targetType=media&perPage=100")
+    ).json()) as { items: { action: string; targetId: string; metadata: string }[] };
+    const entry = logs.items.find(
+      (l) => l.action === "media.delete" && l.targetId === url
+    );
+    expect(entry).toBeTruthy();
+    expect(JSON.parse(entry!.metadata).source).toBe("panel");
+  });
+
+  it("D1 有引用删除 409 + D2 幂等：被引用 409；删文清理后再删同 url 200", async () => {
+    const url = await uploadPng();
+    const articleId = await createArticleReferencing("media-loop-ref", url);
+
+    const denied = await req("/api/admin/media", {
+      method: "DELETE",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ url }),
+    });
+    expect(denied.status).toBe(409);
+    const deniedBody = (await denied.json()) as {
+      ok: boolean;
+      referencedBy: number;
+    };
+    expect(deniedBody.ok).toBe(false);
+    expect(deniedBody.referencedBy).toBeGreaterThanOrEqual(1);
+    // 409 后文件未被删
+    expect(fs.existsSync(diskPathOf(url))).toBe(true);
+
+    // 删文 → E2 引用计数清理删掉文件；此时再 DELETE 同 url → 幂等 200
+    await deleteArticle(articleId);
+    expect(fs.existsSync(diskPathOf(url))).toBe(false);
+    const idempotent = await req("/api/admin/media", {
+      method: "DELETE",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ url }),
+    });
+    expect(idempotent.status).toBe(200);
+    const idempotentBody = (await idempotent.json()) as {
+      ok: boolean;
+      removed: boolean;
+    };
+    expect(idempotentBody.ok).toBe(true);
+    expect(idempotentBody.removed).toBe(false);
+  });
+
+  it("D3 孤儿清单：只含 images/videos 零引用文件，comfy 永不出现", async () => {
+    const orphanPng = await uploadPng();
+    const orphanWebmRes = await req("/api/admin/upload", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: uploadForm(minimalWebm(), "patch2.webm", "video/webm"),
+    });
+    expect(orphanWebmRes.status).toBe(200);
+    const orphanWebm = ((await orphanWebmRes.json()) as { url: string }).url;
+    leftoverPaths.push(diskPathOf(orphanPng), diskPathOf(orphanWebm));
+
+    // 被引用文件：不应出现在孤儿清单
+    const referenced = await uploadPng();
+    const articleId = await createArticleReferencing("media-loop-orphan", referenced);
+    leftoverPaths.push(diskPathOf(referenced));
+
+    // comfy 文件：物理存在于 uploads/comfy/，绝不可被列出/统计
+    const comfyDir = path.join(process.cwd(), "public", "uploads", "comfy");
+    fs.mkdirSync(comfyDir, { recursive: true });
+    const comfyFile = path.join(comfyDir, "integration-comfy-file.json");
+    fs.writeFileSync(comfyFile, '{"nodes":[]}', "utf-8");
+    leftoverPaths.push(comfyFile);
+
+    const res = await req("/api/admin/media/orphans");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      totalFiles: number;
+      totalBytes: number;
+      orphans: { url: string; kind: string; sizeBytes: number; mtime: string }[];
+    };
+    expect(body.ok).toBe(true);
+    const raw = JSON.stringify(body);
+    // comfy 隔离专项断言：文件名/目录名在响应任何位置都不出现
+    expect(raw).not.toContain("integration-comfy-file");
+    expect(raw).not.toContain("comfy");
+
+    // 总数/总占用覆盖全部 images/videos 文件（≥ 三个测试文件的量）
+    expect(body.totalFiles).toBeGreaterThanOrEqual(3);
+    expect(body.totalBytes).toBeGreaterThanOrEqual(
+      minimalPng().length + minimalWebm().length
+    );
+    // 孤儿清单：两个无引用文件在列、被引用文件不在列；路径形态只允许 images|videos
+    expect(body.orphans.some((o) => o.url === orphanPng)).toBe(true);
+    expect(body.orphans.some((o) => o.url === orphanWebm)).toBe(true);
+    expect(body.orphans.some((o) => o.url === referenced)).toBe(false);
+    for (const o of body.orphans) {
+      expect(o.url).toMatch(/^\/uploads\/(images|videos)\/[A-Za-z0-9._-]+$/);
+      expect(o.sizeBytes).toBeGreaterThan(0);
+      expect(Number.isNaN(new Date(o.mtime).getTime())).toBe(false);
+    }
+
+    // A5 正常路径：purge 两个孤儿 → deleted + 磁盘消失
+    const purge = await req("/api/admin/media/orphans/purge", {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ urls: [orphanPng, orphanWebm] }),
+    });
+    expect(purge.status).toBe(200);
+    const purgeBody = (await purge.json()) as {
+      ok: boolean;
+      deleted: string[];
+      skipped: unknown[];
+    };
+    expect(purgeBody.ok).toBe(true);
+    expect(purgeBody.deleted).toEqual([orphanPng, orphanWebm]);
+    expect(purgeBody.skipped).toEqual([]);
+    expect(fs.existsSync(diskPathOf(orphanPng))).toBe(false);
+    expect(fs.existsSync(diskPathOf(orphanWebm))).toBe(false);
+
+    // orphan-sweep 审计：逐文件落 media.delete 且 source=orphan-sweep
+    const logs = (await (
+      await req("/api/admin/audit-logs?targetType=media&perPage=100")
+    ).json()) as { items: { action: string; targetId: string; metadata: string }[] };
+    for (const url of [orphanPng, orphanWebm]) {
+      const entry = logs.items.find(
+        (l) => l.action === "media.delete" && l.targetId === url
+      );
+      expect(entry).toBeTruthy();
+      expect(JSON.parse(entry!.metadata).source).toBe("orphan-sweep");
+    }
+
+    await deleteArticle(articleId); // E2 清理被引用文件
+  });
+
+  it("D4 purge 竞态防护：清单生成后文章又引用 → skipped 不删", async () => {
+    const url = await uploadPng();
+    leftoverPaths.push(diskPathOf(url));
+
+    // 1) 扫描：此时零引用，文件在孤儿清单中
+    const scan = (await (
+      await req("/api/admin/media/orphans")
+    ).json()) as { orphans: { url: string }[] };
+    expect(scan.orphans.some((o) => o.url === url)).toBe(true);
+
+    // 2) 清单生成后，另一"会话"保存了引用该图的文章
+    const articleId = await createArticleReferencing("media-loop-race", url);
+
+    // 3) purge：独立重查引用 → skipped，不删
+    const purge = await req("/api/admin/media/orphans/purge", {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ urls: [url] }),
+    });
+    expect(purge.status).toBe(200);
+    const purgeBody = (await purge.json()) as {
+      ok: boolean;
+      deleted: string[];
+      skipped: { url: string; referencedBy: number }[];
+    };
+    expect(purgeBody.ok).toBe(true);
+    expect(purgeBody.deleted).toEqual([]);
+    expect(purgeBody.skipped).toEqual([{ url, referencedBy: 1 }]);
+    expect(fs.existsSync(diskPathOf(url))).toBe(true);
+
+    await deleteArticle(articleId); // 清理
+  });
+});
+
 describe("改密后吊销会话（会破坏登录态，放最后段执行并恢复）", () => {
   it("改密后旧会话立即 401，新密码可登录，旧密码不可用", async () => {
     // 前置：此时 jar 已登录（前面 describe 已建好登录态 + csrfToken）
