@@ -7,10 +7,12 @@
  * URL 先过协议校验（isSafeMediaUrl），不安全/缺失渲染降级占位，
  * 不输出 img src——javascript:/data: 等危险协议没有任何到达 DOM 的路径。
  * 灯箱为零依赖自实现（遮罩 + 原图/视频 + 点击/Esc 关闭），导出供编辑器
- * NodeView 共享（M2-补丁2 B1/B2）。M2-补丁3：图片点击在 fit（适应窗口）
- * ⇄ zoomed（原始像素，容器可滚动/可拖拽平移）间切换，光标 zoom-in/zoom-out
- * 随态切换——光标样式直接挂在 img 上（img 是最上层的点击目标，此前挂在
- * 遮罩上被 img 覆盖，主人看到"光标在图片下面"即此因）。
+ * NodeView 共享（M2-补丁2 B1/B2）。
+ * M2-补丁4（主人实测裁决）：删除 M2-补丁3 的 fit⇄zoomed 点击缩放状态机
+ * （存在明显缺陷且不需要）；灯箱回归"黑幕 + 适应窗口原图 + 关闭"最简形态。
+ * 灯箱打开期间隐藏 ba-click-fx 特效层——其 contrastCanvas 为 mix-blend-mode:
+ * darken，在灯箱黑幕（近纯黑）上 darken 取暗色，蓝色拖尾特效被混合吞掉，
+ * 观感即"光标沉到图片和黑幕之下"。离开灯箱即恢复特效。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -31,15 +33,11 @@ function MediaFallback({ message }: { message: string }) {
 
 export type MediaLightboxKind = "image" | "video";
 
-/** 拖拽平移判定阈值：位移超过该值视为拖拽（抑制随后的 click 缩放切换） */
-const DRAG_THRESHOLD_PX = 4;
-
 /**
  * 零依赖媒体灯箱（共享组件）：遮罩 + 内容 + 点击/Esc 关闭。
- * kind=image：点击图片在 fit（适应窗口，cursor-zoom-in）⇄ zoomed（原始
- * 像素尺寸，容器可滚动、可按住拖拽平移，cursor-zoom-out）间切换；点击
- * 图片外（遮罩）或 Esc 关闭。图片容器 stopPropagation——图片上的点击只
- * 切换缩放，永不冒泡成"关闭"。
+ * kind=image：适应窗口的静态原图展示（M2-补丁4 按主人裁决移除点击缩放
+ * 状态机）；点击图片外（遮罩）或 Esc 关闭。图片容器 stopPropagation——
+ * 图片上的点击永不冒泡成"关闭"。
  * kind=video 渲染 <video controls autoPlay>（仅在灯箱打开时挂载——编辑区/
  * 正文默认零视频下载，M2-补丁2 B2），行为不变，仅同步遮罩层级（视频区域
  * stopPropagation 已有，遮罩不再带 zoom 光标——那是图片缩放语义）。
@@ -55,18 +53,6 @@ export function MediaLightbox({
   kind?: MediaLightboxKind;
   onClose: () => void;
 }) {
-  // 状态机：fit（适应窗口）⇄ zoomed（原始像素）⇄ 关闭（组件卸载）
-  const [zoomed, setZoomed] = useState(false);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const panRef = useRef<{
-    startX: number;
-    startY: number;
-    scrollLeft: number;
-    scrollTop: number;
-    moved: boolean;
-  } | null>(null);
-  const suppressClickRef = useRef(false);
-
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -74,47 +60,25 @@ export function MediaLightbox({
     document.addEventListener("keydown", onKey);
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
+    // M2-补丁4：隐藏 ba-click-fx 特效层（body 直属、aria-hidden、
+    // z-index ≥ 2147483640 的 canvas 层）。其 darken 混合在灯箱黑幕上吞掉
+    // 拖尾特效（主人观感"光标沉底"）；看图场景特效让位，关闭即恢复。
+    const hiddenFx: HTMLElement[] = [];
+    document.body
+      .querySelectorAll<HTMLElement>(":scope > [aria-hidden='true']")
+      .forEach((el) => {
+        const z = Number.parseInt(el.style.zIndex || "0", 10);
+        if (z >= 2147483640) {
+          hiddenFx.push(el);
+          el.style.display = "none";
+        }
+      });
     return () => {
       document.removeEventListener("keydown", onKey);
       document.body.style.overflow = prevOverflow;
+      hiddenFx.forEach((el) => (el.style.display = ""));
     };
   }, [onClose]);
-
-  // zoomed 态拖拽平移：按住图片拖动 = 滚动容器（原生滚动位移动画零依赖）。
-  // 与点击切换的边界：位移超阈值标记 moved，mouseup 后的 click 被抑制一次。
-  useEffect(() => {
-    if (!zoomed) return;
-    const onMove = (e: MouseEvent) => {
-      const pan = panRef.current;
-      const el = scrollRef.current;
-      if (!pan || !el) return;
-      const dx = e.clientX - pan.startX;
-      const dy = e.clientY - pan.startY;
-      if (Math.abs(dx) > DRAG_THRESHOLD_PX || Math.abs(dy) > DRAG_THRESHOLD_PX) {
-        pan.moved = true;
-      }
-      el.scrollLeft = pan.scrollLeft - dx;
-      el.scrollTop = pan.scrollTop - dy;
-    };
-    const onUp = () => {
-      if (panRef.current?.moved) suppressClickRef.current = true;
-      panRef.current = null;
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, [zoomed]);
-
-  const handleImgClick = useCallback(() => {
-    if (suppressClickRef.current) {
-      suppressClickRef.current = false; // 拖拽平移结束，吞掉本次 click
-      return;
-    }
-    setZoomed((v) => !v);
-  }, []);
 
   return createPortal(
     <div
@@ -143,43 +107,13 @@ export function MediaLightbox({
           </button>
         </span>
       ) : (
-        <div
-          ref={scrollRef}
-          onClick={(e) => e.stopPropagation()}
-          className={
-            zoomed
-              ? "flex max-h-full max-w-full overflow-auto"
-              : "flex max-h-full max-w-full"
-          }
-        >
+        <div onClick={(e) => e.stopPropagation()} className="flex max-h-full max-w-full">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={src}
             alt={alt}
             draggable={false}
-            onClick={handleImgClick}
-            onMouseDown={
-              zoomed
-                ? (e) => {
-                    const el = scrollRef.current;
-                    if (!el) return;
-                    panRef.current = {
-                      startX: e.clientX,
-                      startY: e.clientY,
-                      scrollLeft: el.scrollLeft,
-                      scrollTop: el.scrollTop,
-                      moved: false,
-                    };
-                  }
-                : undefined
-            }
-            className={
-              zoomed
-                ? // 原始像素：不限制宽高；m-auto 在 flex 滚动容器内溢出安全
-                  //（内容大于容器时 auto margin 落 0，从左上起可滚动，不裁剪）
-                  "m-auto max-w-none cursor-zoom-out select-none"
-                : "max-h-[90vh] max-w-full cursor-zoom-in rounded-md object-contain shadow-2xl"
-            }
+            className="max-h-[90vh] max-w-full rounded-md object-contain shadow-2xl"
           />
         </div>
       )}

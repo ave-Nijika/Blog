@@ -2,9 +2,9 @@
  * @vitest-environment happy-dom
  *
  * 媒体 UI 组件测试（M2-补丁3 B/C）：
- *   - MediaLightbox：fit ⇄ zoomed 缩放状态机（点击图片切换，光标类随态
- *     切换）、图片上点击不冒泡成关闭、点击遮罩关闭、Esc 关闭、video 行为
- *     保持（controls autoPlay + 关闭按钮）。
+ *   - MediaLightbox：静态原图展示（M2-补丁4 按主人裁决移除缩放状态机——
+ *     点击图片无行为、图片上点击不冒泡成关闭）、点击遮罩关闭、Esc 关闭、
+ *     video 行为保持（controls autoPlay + 关闭按钮）。
  *   - TwoStepButton：两段式内置确认——第一击进入待确认态（不执行）、
  *     第二击执行、超时回退、移开悬停回退、resetKey 变化回退。
  * 全部零依赖 DOM 交互断言，无 window.confirm / 无阻塞路径。
@@ -22,7 +22,7 @@ afterEach(() => {
 });
 
 describe("MediaLightbox（M2-补丁3 B）", () => {
-  it("fit ↔ zoomed：点击图片切换，光标类随态切换", () => {
+  it("M2-补丁4：缩放状态机已移除——点击图片无行为，展示保持适应窗口", () => {
     render(
       React.createElement(MediaLightbox, {
         src: "/uploads/images/a.png",
@@ -31,20 +31,14 @@ describe("MediaLightbox（M2-补丁3 B）", () => {
       })
     );
     const img = screen.getByRole("img", { name: "示例图" });
-    // fit 态：适应窗口 + zoom-in 光标
-    expect(img.className).toContain("cursor-zoom-in");
     expect(img.className).toContain("max-h-[90vh]");
-
-    fireEvent.click(img);
-    // zoomed 态：原始像素（不限制宽高）+ zoom-out 光标
-    expect(img.className).toContain("cursor-zoom-out");
-    expect(img.className).toContain("max-w-none");
     expect(img.className).not.toContain("cursor-zoom-in");
+    expect(img.className).not.toContain("cursor-zoom-out");
 
     fireEvent.click(img);
-    // 再点回 fit
-    expect(img.className).toContain("cursor-zoom-in");
-    expect(img.className).not.toContain("cursor-zoom-out");
+    fireEvent.click(img);
+    // 点击图片不再切换任何状态，也永不关闭
+    expect(img.className).toContain("max-h-[90vh]");
   });
 
   it("图片上的点击不冒泡成关闭；点击遮罩（图片外）关闭", () => {
@@ -59,7 +53,7 @@ describe("MediaLightbox（M2-补丁3 B）", () => {
     const dialog = screen.getByRole("dialog", { name: "示例图" });
     const img = screen.getByRole("img", { name: "示例图" });
 
-    // 点击图片（含切 zoomed 后再点）只切换缩放，永不关闭
+    // 点击图片（缩放已删，无任何行为）永不关闭
     fireEvent.click(img);
     fireEvent.click(img);
     expect(onClose).not.toHaveBeenCalled();
