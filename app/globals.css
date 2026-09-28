@@ -783,7 +783,10 @@ html.ba-cursor-active select {
   position: fixed;
   top: 0;
   left: 0;
-  z-index: 9999;
+  /* M2-补丁4b（凛）：提到 int32 上限——原 9999 与 MediaLightbox 同层，
+     灯箱 portal 在 body 末尾按 DOM 序后绘制，把蓝三角盖住（主人观感
+     "光标沉到图片下面"）。zcode 勘察实测 2147483647 后三角恒定可见。 */
+  z-index: 2147483647;
   pointer-events: none;
   will-change: transform;
   filter: drop-shadow(0 1px 3px rgba(18, 137, 249, 0.45));
