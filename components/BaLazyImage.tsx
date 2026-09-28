@@ -45,6 +45,11 @@ interface LazyImageProps {
    * 客户端重渲染影响但结构必须合法。默认 false，瀑布墙等既有用法零影响。
    */
   inline?: boolean;
+  /**
+   * 加载失败回调（M2-补丁2 D1/A4：缩略图降级原图用）。BaLazyImage 内部
+   * onError 仍照常撤骨架；本回调供调用方切换 src。
+   */
+  onLoadError?: () => void;
 }
 
 /**
@@ -52,7 +57,14 @@ interface LazyImageProps {
  * 仅用于列表/瀑布墙等非首屏图片；用户主动点击（灯箱）不受限流。
  * 卸载时若仍占着槽位则归还，避免槽位泄漏。
  */
-export function BaLazyImage({ src, alt, className, onClick, inline = false }: LazyImageProps) {
+export function BaLazyImage({
+  src,
+  alt,
+  className,
+  onClick,
+  inline = false,
+  onLoadError,
+}: LazyImageProps) {
   const [shouldLoad, setShouldLoad] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const holder = useRef<HTMLDivElement | HTMLSpanElement>(null);
@@ -112,6 +124,7 @@ export function BaLazyImage({ src, alt, className, onClick, inline = false }: La
           onError={() => {
             releaseSlot();
             setLoaded(true); // 失败也撤骨架，避免永久占位
+            onLoadError?.(); // M2-补丁2：缩略图降级原图（调用方切换 src）
           }}
           onClick={onClick}
           className={`${className ?? ""} transition-opacity duration-500 ${loaded ? "opacity-100" : "opacity-0"}`}

@@ -25,6 +25,7 @@ import {
   mediaKindByExtension,
 } from "@/lib/media";
 import { buildEditorExtensions } from "./extensions";
+import { MediaActionsContext } from "./media-actions";
 import { markdownToEditorJson, serializeDocToMarkdown } from "./markdown";
 
 type Props = {
@@ -270,6 +271,7 @@ export function RichTextEditor({
       <div className="min-h-[18rem] animate-pulse rounded-md border border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800/60" />
     );
   }
+  const mediaActions = { articleId, onNotify };
 
   const updateSelectedMedia = (attrs: Record<string, unknown>) => {
     const target = selectedMediaRef.current;
@@ -282,6 +284,7 @@ export function RichTextEditor({
   };
 
   return (
+    <MediaActionsContext.Provider value={mediaActions}>
     <div className="flex flex-col gap-2">
       {/* 工具栏（A5：既有媒体按钮迁移 + 基础排版能力） */}
       <div className="flex flex-wrap items-center gap-1.5">
@@ -468,6 +471,7 @@ export function RichTextEditor({
         }}
       />
     </div>
+    </MediaActionsContext.Provider>
   );
 }
 
