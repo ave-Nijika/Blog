@@ -290,6 +290,55 @@ export function PostEditor({ initial, mode }: Props) {
     void uploadFilesAndInsert(files, pos);
   }
 
+  /**
+   * B（M1-补丁2）：媒体面板"彻底删除"——先弹确认框（文案明确两种后果），
+   * 调 DELETE /api/admin/media；409 展示引用数且不重试；成功后把该文件
+   * 在本文中的全部媒体块从正文移除（文件已删，保留块只会得到坏图），
+   * 面板列表随 body 派生自动更新。
+   */
+  async function deleteMediaFile(url: string) {
+    const label = url.split("/").pop() || url;
+    const confirmed = window.confirm(
+      `彻底删除「${label}」？\n\n` +
+        `· 该文件若未被任何文章引用，将从服务器永久删除（不可恢复）；\n` +
+        `· 若仍被文章引用，删除会被拒绝（不会误删）。`
+    );
+    if (!confirmed) return;
+    try {
+      const res = await fetchWithCsrf("/api/admin/media", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        referencedBy?: number;
+      };
+      if (res.status === 409) {
+        // B4：展示服务端返回的引用数，不重试不循环
+        showUploadError(`「${label}」${data.error || `仍被 ${data.referencedBy ?? "?"} 处引用，无法删除`}`);
+        return;
+      }
+      if (!res.ok || !data.ok) {
+        showUploadError(`「${label}」删除失败：${data.error || `HTTP ${res.status}`}`);
+        return;
+      }
+      // B3：从正文移除全部引用该文件的媒体块（从后往前删，行号不失效）
+      let body = bodyTextRef.current;
+      for (;;) {
+        const blocks = findMediaBlocks(body);
+        const last = blocks.findIndex((b) => b.url === url);
+        if (last === -1) break;
+        body = removeMediaBlockAt(body, last);
+      }
+      bodyTextRef.current = body;
+      update("body", body);
+    } catch {
+      showUploadError(`「${label}」删除失败：网络异常，请重试`);
+    }
+  }
+
   function buildPayload(targetStatus: "draft" | "public" | "private") {
     // 发布时间语义：
     // - 发布时（targetStatus === "public"）：publishedAt 为空则自动设为当前时间
@@ -684,6 +733,7 @@ export function PostEditor({ initial, mode }: Props) {
           items={mediaBlocks}
           onMove={(from, to) => update("body", moveMediaBlockAt(values.body, from, to))}
           onRemove={(index) => update("body", removeMediaBlockAt(values.body, index))}
+          onDeleteFile={(url) => void deleteMediaFile(url)}
         />
       ) : null}
     </div>
@@ -693,16 +743,20 @@ export function PostEditor({ initial, mode }: Props) {
 /**
  * D：媒体面板——列出正文中的媒体块（缩略图/图标 + alt），HTML5 draggable
  * 拖拽整块移动（指示线 = 被拖块将成为的位置），✕ 把该块从正文移除。
- * 正文变换全部委托 lib/media.ts 纯函数（其余内容零改动由单测保证）。
+ * 「彻底删除」（M1-补丁2 B）：独立危险色操作，删服务器文件（引用计数
+ * 由后端把关，被引用文件拒绝删除）。正文变换全部委托 lib/media.ts
+ * 纯函数（其余内容零改动由单测保证）。
  */
 function MediaPanel({
   items,
   onMove,
   onRemove,
+  onDeleteFile,
 }: {
   items: MediaBlockInfo[];
   onMove: (from: number, to: number) => void;
   onRemove: (index: number) => void;
+  onDeleteFile: (url: string) => void;
 }) {
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
@@ -720,7 +774,7 @@ function MediaPanel({
           媒体（{items.length}）
         </span>
         <span className="text-xs text-slate-400 dark:text-slate-500">
-          拖动条目调整在文中的位置；✕ 仅从正文移除，不删服务器文件
+          拖动调整位置；✕ 仅从正文移除（文件保留，可去「媒体管理」清理）；「彻底删除」删服务器文件
         </span>
       </div>
       <ul className="flex flex-col">
@@ -785,14 +839,28 @@ function MediaPanel({
                   {item.kind === "image" ? "图片" : "视频"} · {item.url}
                 </span>
               </span>
-              <button
-                type="button"
-                onClick={() => onRemove(i)}
-                aria-label={`从正文移除媒体 ${item.alt || item.url}`}
-                className="shrink-0 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-500 transition-colors hover:border-rose-300 hover:text-rose-600 dark:border-slate-700 dark:text-slate-400 dark:hover:border-rose-800 dark:hover:text-rose-400"
-              >
-                ✕
-              </button>
+              <span className="flex shrink-0 items-center gap-1.5">
+                {/* ✕ 仅从正文移除（文件保留，孤儿清理由删除联动/媒体管理负责） */}
+                <button
+                  type="button"
+                  onClick={() => onRemove(i)}
+                  aria-label={`从正文移除媒体 ${item.alt || item.url}`}
+                  title="仅从正文移除（服务器文件保留）"
+                  className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-500 transition-colors hover:border-rose-300 hover:text-rose-600 dark:border-slate-700 dark:text-slate-400 dark:hover:border-rose-800 dark:hover:text-rose-400"
+                >
+                  ✕
+                </button>
+                {/* 彻底删除（M1-补丁2 B1）：危险色实底 + 文字标签，与 ✕ 视觉区分 */}
+                <button
+                  type="button"
+                  onClick={() => onDeleteFile(item.url)}
+                  aria-label={`彻底删除文件 ${item.alt || item.url}`}
+                  title="从服务器永久删除该文件（仍被其他文章引用时会被拒绝）"
+                  className="rounded-md bg-rose-600 px-2 py-1 text-xs font-medium text-white shadow-sm transition-colors hover:bg-rose-700"
+                >
+                  彻底删除
+                </button>
+              </span>
             </li>
           );
         })}
