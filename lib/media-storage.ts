@@ -1,10 +1,17 @@
 /**
- * 媒体文件存储层（M1-补丁1 A/E，服务端专用）。
+ * 媒体文件存储层（M1-补丁1 A/E + 紧急修复，服务端专用）。
  *
- * 落盘位置（任务书 A5）：public/uploads/{images|videos}/，Next 运行时按请求
- * 从 public/ 磁盘目录直接以 /uploads/... URL 提供静态服务。
- * 生产持久化由部署侧保证（compose 卷挂载点/entrypoint 配合项见任务报告）；
- * MEDIA_UPLOADS_DIR 环境变量可整体覆盖存储根目录（集成测试指向临时目录）。
+ * 落盘根目录解析顺序（线上事故修复 2026-09-28）：
+ *   1. UPLOAD_DIR（生产 compose 既有约定，指向 uploads-data 持久化卷）
+ *   2. MEDIA_UPLOADS_DIR（集成测试用临时目录）
+ *   3. public/uploads（本地开发回退）
+ *
+ * 事故背景：原实现只认 MEDIA_UPLOADS_DIR，线上未设该变量 → 回退写进镜像内
+ * public/uploads。Next.js standalone 模式下 public/ 是构建期 COPY 进镜像的，
+ * 运行时写入的文件不被静态服务 → 文章图片/视频全部 404（截图确认 alt 兜底）。
+ * 同时 media 文件写在容器可写层，容器重建即丢。修复：根目录对齐 UPLOAD_DIR
+ * 卷挂载点，并由 app/uploads/[...path] 路由提供静态服务（public 在 standalone
+ * 下不可运行时写入，这是 Next.js 的既定行为，不是配置疏漏）。
  *
  * 安全红线：
  *   - 文件名只由服务端生成 {YYYYMMDD}-{8位随机}.{ext}，绝不采信客户端文件名；
@@ -16,6 +23,9 @@ import path from "node:path";
 import type { MediaKind } from "@/lib/media";
 
 export function getUploadsRoot(): string {
+  // 优先生产卷挂载点 UPLOAD_DIR（compose.prod.yml 既有环境变量）
+  const uploadDir = process.env.UPLOAD_DIR?.trim();
+  if (uploadDir) return path.resolve(process.cwd(), uploadDir);
   const override = process.env.MEDIA_UPLOADS_DIR?.trim();
   if (override) return path.resolve(process.cwd(), override);
   return path.join(process.cwd(), "public", "uploads");
@@ -96,4 +106,46 @@ export async function deleteUploadFilesByUrls(urls: string[]): Promise<string[]>
     }
   }
   return deleted;
+}
+
+export interface ManagedUploadFile {
+  url: string;
+  kind: MediaKind;
+  fileName: string;
+  sizeBytes: number;
+  mtime: Date;
+}
+
+/**
+ * 孤儿巡检的文件枚举（M1-补丁2 A4）。
+ * comfy 隔离红线：只遍历 images/ 与 videos/ 两个固定子目录（uploadsDirFor
+ * 的构造即如此——comfy/ 在存储根下但从不进入本函数），深度固定两级
+ * （kind 目录 → 文件），不递归任何未知子目录；大小/时间取自 stat，
+ * 不做任何内容读取。目录不存在视为该类暂无文件（尚未上传过）。
+ */
+export async function listManagedUploadFiles(): Promise<ManagedUploadFile[]> {
+  const kinds: MediaKind[] = ["image", "video"];
+  const out: ManagedUploadFile[] = [];
+  for (const kind of kinds) {
+    const dir = uploadsDirFor(kind);
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      continue; // 目录不存在/不可读 → 该类暂无文件
+    }
+    for (const entry of entries) {
+      if (!entry.isFile()) continue; // 固定两级：只认文件，不进入子目录
+      const st = await fs.stat(path.join(dir, entry.name)).catch(() => null);
+      if (!st) continue;
+      out.push({
+        url: uploadsUrlFor(kind, entry.name),
+        kind,
+        fileName: entry.name,
+        sizeBytes: st.size,
+        mtime: st.mtime,
+      });
+    }
+  }
+  return out;
 }

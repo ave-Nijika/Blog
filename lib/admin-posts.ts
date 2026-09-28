@@ -19,6 +19,7 @@ import { commitFiles, removeFiles, GitCommitError } from "@/lib/content-git";
 import { getPostsDir } from "@/lib/content-paths";
 import { clearPostsCache } from "@/lib/content";
 import { extractAllUploadReferences } from "@/lib/media";
+import { buildUploadReferenceIndex } from "@/lib/media-references";
 import { deleteUploadFilesByUrls } from "@/lib/media-storage";
 import { AUDIT_ACTIONS, logAudit } from "@/lib/audit";
 import { revalidatePath } from "next/cache";
@@ -629,10 +630,13 @@ export interface DeletePostResult {
 }
 
 /**
- * E2 媒体引用计数（M1-补丁1）：
- *   - 扫描磁盘上其余全部文章 md（含草稿/私有，frontmatter cover 一并覆盖），
- *     汇总仍被引用的 /uploads/ 文件；
- *   - 被删文章引用的候选文件中，零引用才删盘，有引用的保留；
+ * E2 媒体引用计数（M1-补丁1/2）：
+ *   - 候选 = 被删文章 rawMarkdown（含 frontmatter cover）中的 uploads 引用
+ *     （extractAllUploadReferences 宽提取）；
+ *   - 引用索引用 lib/media-references 的共享扫描（唯一文件枚举口径，
+ *     M1-补丁2 起与媒体删除 API 共用）；调用时被删文章的 md 已从磁盘移除，
+ *     索引天然只含"其余文章"的引用；
+ *   - 零引用才删盘，有引用的保留；
  *   - E3：编辑保存移除媒体不删文件（本函数只在文章物理删除时调用）。
  * 删除动作写审计日志（media.delete）。
  */
@@ -644,26 +648,13 @@ async function cleanupArticleUploads(
   const candidates = [...new Set(extractAllUploadReferences(deletedRawMarkdown))];
   if (candidates.length === 0) return { deleted: [], kept: 0 };
 
-  const referencedElsewhere = new Set<string>();
-  let entries: string[] = [];
-  try {
-    entries = await fs.readdir(POSTS_DIR());
-  } catch {
-    // 目录不可读时保守处理：视为全部仍被引用，不删任何文件
+  const index = await buildUploadReferenceIndex();
+  if (!index) {
+    // 文章目录不可读 → 引用状态未知，保守全保留
     return { deleted: [], kept: candidates.length };
   }
-  for (const name of entries) {
-    if (!name.endsWith(".md") || name === `${deletedSlug}.md`) continue;
-    try {
-      const raw = await fs.readFile(path.join(POSTS_DIR(), name), "utf-8");
-      for (const url of extractAllUploadReferences(raw)) referencedElsewhere.add(url);
-    } catch {
-      // 单个文件读取失败按"仍有引用"处理（宁可保留不可误删）
-      continue;
-    }
-  }
 
-  const deletable = candidates.filter((url) => !referencedElsewhere.has(url));
+  const deletable = candidates.filter((url) => !index.has(url));
   let deleted: string[] = [];
   if (deletable.length > 0) {
     try {
