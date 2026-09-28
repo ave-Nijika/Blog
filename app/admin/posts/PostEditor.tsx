@@ -28,6 +28,7 @@ import "highlight.js/styles/github-dark.css";
 import { fetchWithCsrf } from "@/lib/fetchWithCsrf";
 import { RichTextEditor } from "@/lib/editor/RichTextEditor";
 import { TwoStepButton } from "@/components/TwoStepButton";
+import { compressImageFile } from "@/lib/image-compress";
 import { getMarkdownComponents } from "@/lib/markdown-components";
 import {
   altFromFileName,
@@ -273,8 +274,12 @@ export function PostEditor({ initial, mode }: Props) {
         continue;
       }
       try {
+        // M2-补丁5 B2：上传前浏览器端压缩（最长边 2560 / jpeg 0.85；GIF、
+        // 小图、透明 PNG 自动跳过，解码失败降级原样上传）。压缩期间占位
+        // 文案/按钮状态由既有 uploading 流程体现。
+        const processed = await compressImageFile(file);
         const form = new FormData();
-        form.append("file", file);
+        form.append("file", processed);
         const res = await fetchWithCsrf("/api/admin/upload", {
           method: "POST",
           body: form,

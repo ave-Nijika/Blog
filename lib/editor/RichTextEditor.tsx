@@ -28,6 +28,7 @@ import {
 import { buildEditorExtensions } from "./extensions";
 import { MediaActionsContext } from "./media-actions";
 import { markdownToEditorJson, serializeDocToMarkdown } from "./markdown";
+import { compressImageFile } from "@/lib/image-compress";
 
 type Props = {
   initialBody: string;
@@ -40,8 +41,12 @@ type Props = {
 };
 
 async function uploadMediaFile(file: File): Promise<string> {
+  // M2-补丁5 B2：上传前浏览器端压缩（最长边 2560 / jpeg 0.85；GIF、小图、
+  // 透明 PNG 自动跳过，解码失败降级原样上传）。粘贴/拖拽/替换三通道共用
+  // 本函数，占位节点在上传期间保持"上传中"转圈（压缩耗时一并体现）。
+  const processed = await compressImageFile(file);
   const form = new FormData();
-  form.append("file", file);
+  form.append("file", processed);
   const res = await fetchWithCsrf("/api/admin/upload", {
     method: "POST",
     body: form,

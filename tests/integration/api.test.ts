@@ -2120,6 +2120,35 @@ describe("媒体缩略图与内容哈希去重（M2-补丁2）", () => {
     expect(different.url).not.toBe(first.url);
     leftoverPaths.push(diskPathOf(different.url), diskPathOf(thumbUrlOf(different.url)));
   });
+
+  it("D3 上传链路（M2-补丁5）：客户端压缩产物 jpeg 上传 200，文件名仍由服务端生成", async () => {
+    // 模拟浏览器 canvas.toBlob(jpeg) 的压缩产物（服务端零改动，链路照常）
+    sharpMod = sharpMod ?? ((await import("sharp")) as typeof import("sharp"));
+    const jpeg = await sharpMod
+      .default({
+        create: { width: 320, height: 240, channels: 3, background: { r: 10, g: 20, b: 30 } },
+      })
+      .jpeg()
+      .toBuffer();
+    const form = new FormData();
+    // 客户端文件名随意（压缩产物名）——服务端安全语义不采信客户端名（B3）
+    form.append(
+      "file",
+      new Blob([jpeg], { type: "image/jpeg" }),
+      "client-compressed-任意名.jpg"
+    );
+    const res = await req("/api/admin/upload", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: form,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; url: string };
+    expect(body.ok).toBe(true);
+    // 服务端命名 {YYYYMMDD}-{sha256前16位}.jpg，与客户端名零关联
+    expect(body.url).toMatch(/^\/uploads\/images\/\d{8}-[0-9a-f]{16}\.jpg$/);
+    leftoverPaths.push(diskPathOf(body.url));
+  });
 });
 
 describe("改密后吊销会话（会破坏登录态，放最后段执行并恢复）", () => {
