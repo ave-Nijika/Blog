@@ -7,7 +7,7 @@
  * 没有任何到达 DOM 的路径、裸 HTML 不被注入。详情页（RSC）同一配置的
  * 端到端验证在 tests/integration/api.test.ts（文章页 SSR 含 <video）。
  */
-import { describe, it, expect, beforeAll, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
 import { render, screen, fireEvent, cleanup } from "@testing-library/react";
 import React from "react";
 import ReactMarkdown from "react-markdown";
@@ -43,7 +43,10 @@ beforeAll(() => {
   }
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 function renderMarkdown(body: string, enhanceCodeBlock = false) {
   return render(
@@ -70,7 +73,11 @@ describe("共享渲染配置：@video 与图片（F5）", () => {
     expect(video!.getAttribute("src")).toBe("/uploads/videos/20260101-abcd1234.mp4");
   });
 
-  it("站内图片渲染真实 <img>（缩略图），点击灯箱加载原图（M2-补丁2 D1）", () => {
+  it("站内图片渲染真实 <img>（缩略图），点击灯箱 blur-up 秒开缩略图（M2-补丁2 D1 + M2-补丁5 A1）", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})) // 原图 fetch 保持 pending：只验秒开层
+    );
     const { container } = renderMarkdown(
       "![截图](/uploads/images/20260101-abcd1234.png)"
     );
@@ -85,10 +92,12 @@ describe("共享渲染配置：@video 与图片（F5）", () => {
     fireEvent.click(img!);
     const dialog = document.body.querySelector('[role="dialog"]');
     expect(dialog).toBeTruthy();
-    const lightboxImg = dialog!.querySelector("img");
-    // 灯箱始终加载原图（A3）
-    expect(lightboxImg!.getAttribute("src")).toBe(
-      "/uploads/images/20260101-abcd1234.png"
+    // M2-补丁5：灯箱打开瞬间渲染已缓存的 w1600 缩略图（blur-up 零等待），
+    // 原图经后台 fetch（AbortController）就绪后淡入——时序细节见 media-ui 单测
+    const lightboxThumb = dialog!.querySelector('[data-testid="lightbox-thumb"]');
+    expect(lightboxThumb).toBeTruthy();
+    expect(lightboxThumb!.getAttribute("src")).toBe(
+      "/uploads/images/thumb/20260101-abcd1234.w1600.webp"
     );
     // 点击遮罩关闭
     fireEvent.click(dialog!);

@@ -13,6 +13,9 @@
  * 灯箱打开期间隐藏 ba-click-fx 特效层——其 contrastCanvas 为 mix-blend-mode:
  * darken，在灯箱黑幕（近纯黑）上 darken 取暗色，蓝色拖尾特效被混合吞掉，
  * 观感即"光标沉到图片和黑幕之下"。离开灯箱即恢复特效。
+ * M2-补丁5：灯箱 blur-up 秒开——打开瞬间渲染浏览器已缓存的 w1600 缩略图
+ * （blur 弱化），原图后台 fetch（AbortController 可中断）就绪后淡入替换，
+ * 消除点击放大的白屏等待；加载中随时可关（abort，见 BlurPhase 状态机）。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -34,13 +37,31 @@ function MediaFallback({ message }: { message: string }) {
 export type MediaLightboxKind = "image" | "video";
 
 /**
+ * blur-up 状态机（M2-补丁5 A）：
+ *   thumb   —— 打开瞬间：仅渲染 w1600 缩略图（浏览器已缓存，零网络等待），
+ *              blur(8px)+scale(1.02) 弱化像素感；后台 fetch 原图中
+ *   cross   —— 原图 blob 就绪并 onload：原图层叠在缩略图上方淡入（300ms），
+ *              观感即"模糊图逐渐变清晰"
+ *   done    —— 淡入完成：模糊层 visibility 隐藏（视觉移除；元素保留撑位，
+ *              避免原图固有尺寸大于缩略图时的布局跳动）
+ *   failed  —— 原图 fetch 失败：保留缩略图模糊态不白屏（console.warn）
+ *   direct  —— 无缩略图可用（外链 / 缩略图加载失败）：原图直出（现状行为）
+ * 原图 fetch 带 AbortController：灯箱关闭/卸载即 abort（绝无"加载中出不去"）；
+ * objectURL 用后 revoke。已缓存缩略图 + 小体积原图（M2-补丁5 上传压缩）共同
+ * 保证"点开放大无等待感"。
+ */
+type BlurPhase = "thumb" | "cross" | "done" | "failed" | "direct";
+
+/** cross 淡入时长（ms，与 transition-opacity duration-300 对应）+ 渲染余量 */
+const CROSSFADE_MS = 340;
+
+/**
  * 零依赖媒体灯箱（共享组件）：遮罩 + 内容 + 点击/Esc 关闭。
- * kind=image：适应窗口的静态原图展示（M2-补丁4 按主人裁决移除点击缩放
- * 状态机）；点击图片外（遮罩）或 Esc 关闭。图片容器 stopPropagation——
- * 图片上的点击永不冒泡成"关闭"。
+ * kind=image：blur-up 秒开（见上方状态机）后的静态原图展示（M2-补丁4 按主人
+ * 裁决移除点击缩放状态机，不恢复）；点击图片外（遮罩）或 Esc 关闭。图片容器
+ * stopPropagation——图片上的点击永不冒泡成"关闭"。
  * kind=video 渲染 <video controls autoPlay>（仅在灯箱打开时挂载——编辑区/
- * 正文默认零视频下载，M2-补丁2 B2），行为不变，仅同步遮罩层级（视频区域
- * stopPropagation 已有，遮罩不再带 zoom 光标——那是图片缩放语义）。
+ * 正文默认零视频下载，M2-补丁2 B2），行为不变，无 blur-up。
  */
 export function MediaLightbox({
   src,
@@ -53,6 +74,14 @@ export function MediaLightbox({
   kind?: MediaLightboxKind;
   onClose: () => void;
 }) {
+  // M2-补丁5 A1：w1600 缩略图已被浏览器缓存（正文/编辑区正在显示），打开
+  // 灯箱瞬间零等待可见；外链等无缩略图映射的 src 走 direct 原图直出
+  const thumbUrl = kind === "image" ? thumbnailUrlFor(src) : null;
+  const [phase, setPhase] = useState<BlurPhase>(thumbUrl ? "thumb" : "direct");
+  const [origUrl, setOrigUrl] = useState<string | null>(null);
+  const crossTimerRef = useRef<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -79,6 +108,58 @@ export function MediaLightbox({
       hiddenFx.forEach((el) => (el.style.display = ""));
     };
   }, [onClose]);
+
+  // M2-补丁5 A2：后台 fetch 原图（AbortController 可中断）。关闭/卸载即
+  // abort；blob 经 objectURL 交给 <img>（CSP img-src blob: 已由凛放行）。
+  useEffect(() => {
+    if (kind !== "image" || !thumbUrl) return;
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    (async () => {
+      try {
+        const res = await fetch(src, { signal: ctrl.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setOrigUrl(objectUrl);
+      } catch (error) {
+        if (cancelled || (error as Error)?.name === "AbortError") return;
+        // A3：保留缩略图模糊态不白屏
+        console.warn("[lightbox] original image failed, keeping blur-up thumb:", error);
+        setPhase((p) => (p === "thumb" ? "failed" : p));
+      }
+    })();
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+      abortRef.current = null;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      if (crossTimerRef.current !== null) {
+        window.clearTimeout(crossTimerRef.current);
+        crossTimerRef.current = null;
+      }
+    };
+  }, [src, kind, thumbUrl]);
+
+  const handleOriginalLoad = useCallback(() => {
+    setPhase((p) => (p === "thumb" ? "cross" : p));
+    if (crossTimerRef.current !== null) window.clearTimeout(crossTimerRef.current);
+    crossTimerRef.current = window.setTimeout(() => {
+      crossTimerRef.current = null;
+      setPhase("done");
+    }, CROSSFADE_MS);
+  }, []);
+
+  // 缩略图加载失败（惰性生成失败等罕见路径）：中止原图 fetch，原图直出
+  const handleThumbError = useCallback(() => {
+    abortRef.current?.abort();
+    setPhase("direct");
+  }, []);
+
+  const showThumb = kind === "image" && thumbUrl !== null && phase !== "direct";
 
   return createPortal(
     <div
@@ -107,14 +188,51 @@ export function MediaLightbox({
           </button>
         </span>
       ) : (
-        <div onClick={(e) => e.stopPropagation()} className="flex max-h-full max-w-full">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={src}
-            alt={alt}
-            draggable={false}
-            className="max-h-[90vh] max-w-full rounded-md object-contain shadow-2xl"
-          />
+        <div onClick={(e) => e.stopPropagation()} className="relative flex max-h-[90vh] max-w-full">
+          {showThumb ? (
+            // 缩略图模糊层：正常流撑起显示框（缩略图已被浏览器缓存，零等待）；
+            // done 后 visibility 隐藏（视觉移除，元素保留避免布局跳动）
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              data-testid="lightbox-thumb"
+              src={thumbUrl}
+              alt=""
+              aria-hidden
+              draggable={false}
+              onError={handleThumbError}
+              className={
+                "max-h-[90vh] max-w-full rounded-md object-contain shadow-2xl " +
+                "blur-[8px] scale-[1.02] " +
+                (phase === "done" ? "invisible" : "")
+              }
+            />
+          ) : null}
+          {phase === "direct" ? (
+            // 无缩略图可用：原图直出（外链 / 缩略图加载失败的降级路径）
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              data-testid="lightbox-original"
+              src={src}
+              alt={alt}
+              draggable={false}
+              className="max-h-[90vh] max-w-full rounded-md object-contain shadow-2xl"
+            />
+          ) : null}
+          {origUrl ? (
+            // 原图层：blob 就绪后渲染，onload 后叠在缩略图上方淡入（cross）
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              data-testid="lightbox-original"
+              src={origUrl}
+              alt={alt}
+              draggable={false}
+              onLoad={handleOriginalLoad}
+              className={
+                "absolute inset-0 h-full w-full object-contain transition-opacity duration-300 " +
+                (phase === "thumb" ? "opacity-0" : "opacity-100")
+              }
+            />
+          ) : null}
         </div>
       )}
     </div>,
