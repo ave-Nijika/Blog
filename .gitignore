@@ -58,3 +58,8 @@ prisma/test.db*
 
 # 公安备案图标（备案号走环境变量注入，仓库不存备案相关资产）
 public/gongan-beian.png
+
+blog_*.tar.gz
+upload_m3.log
+upload_m3_script.py
+build_script.py
