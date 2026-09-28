@@ -49,8 +49,9 @@ prisma/dev.db*
 prisma/test.db*
 
 
-# 上传内容（本地测试产物，生产存 Docker volume）
-uploads/
+# 上传内容（本地测试产物，生产存 Docker volume）。
+# 锚定仓库根：app/uploads/（媒体静态服务路由代码）必须入库，不能被误伤
+/uploads/
 
 # 项目文档（任务书/报告，不入库）
 /docs/
