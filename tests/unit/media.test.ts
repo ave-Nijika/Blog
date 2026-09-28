@@ -328,13 +328,13 @@ describe("@video 语法预处理（renderVideoSyntax）", () => {
   });
 });
 
-describe("缩略图 URL 映射（thumbnailUrlFor，M2-补丁2 A3）", () => {
-  it("站内图片 → /uploads/images/thumb/{base}.webp", () => {
+describe("缩略图 URL 映射（thumbnailUrlFor，M2-补丁2 A3 + M2-补丁3 A2）", () => {
+  it("站内图片 → /uploads/images/thumb/{base}.w1600.webp（带规格后缀）", () => {
     expect(thumbnailUrlFor("/uploads/images/20260928-abcd1234.jpg")).toBe(
-      "/uploads/images/thumb/20260928-abcd1234.webp"
+      "/uploads/images/thumb/20260928-abcd1234.w1600.webp"
     );
     expect(thumbnailUrlFor("/uploads/images/a.webp")).toBe(
-      "/uploads/images/thumb/a.webp"
+      "/uploads/images/thumb/a.w1600.webp"
     );
   });
 
@@ -343,6 +343,7 @@ describe("缩略图 URL 映射（thumbnailUrlFor，M2-补丁2 A3）", () => {
     expect(thumbnailUrlFor("https://example.com/a.png")).toBeNull();
     // thumb 自身已是二级路径，不再映射（无 thumb of thumb）
     expect(thumbnailUrlFor("/uploads/images/thumb/a.webp")).toBeNull();
+    expect(thumbnailUrlFor("/uploads/images/thumb/a.w1600.webp")).toBeNull();
     expect(thumbnailUrlFor("/uploads/images/../../etc/passwd")).toBeNull();
     expect(thumbnailUrlFor("")).toBeNull();
   });

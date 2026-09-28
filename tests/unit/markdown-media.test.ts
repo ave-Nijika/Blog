@@ -76,9 +76,10 @@ describe("共享渲染配置：@video 与图片（F5）", () => {
     );
     const img = container.querySelector("img");
     expect(img).toBeTruthy();
-    // 默认展示走缩略图（thumbnailUrlFor 映射；缺失时由 /uploads 路由惰性生成）
+    // 默认展示走缩略图（thumbnailUrlFor 映射；缺失时由 /uploads 路由惰性生成；
+    // M2-补丁3 A2 新命名带规格后缀 .w1600）
     expect(img!.getAttribute("src")).toBe(
-      "/uploads/images/thumb/20260101-abcd1234.webp"
+      "/uploads/images/thumb/20260101-abcd1234.w1600.webp"
     );
     expect(img!.getAttribute("alt")).toBe("截图");
     fireEvent.click(img!);

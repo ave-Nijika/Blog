@@ -1990,6 +1990,24 @@ describe("媒体缩略图与内容哈希去重（M2-补丁2）", () => {
       .toBuffer();
   }
 
+  /** 指定尺寸的纯色 PNG（1600 档位断言需要大于档位的原图） */
+  async function largePng(width: number, height: number, byte: number): Promise<Buffer> {
+    sharpMod = sharpMod ?? ((await import("sharp")) as typeof import("sharp"));
+    return sharpMod
+      .default({
+        create: { width, height, channels: 3, background: { r: byte, g: byte, b: byte } },
+      })
+      .png()
+      .toBuffer();
+  }
+
+  /** 原图 URL → thumb URL（M2-补丁3 A2 新命名：带规格后缀 .w1600.webp） */
+  function thumbUrlOf(url: string): string {
+    return url
+      .replace(/^\/uploads\/images\//, "/uploads/images/thumb/")
+      .replace(/\.png$/, ".w1600.webp");
+  }
+
   function diskPathOf(url: string): string {
     return path.join(process.cwd(), "public", url);
   }
@@ -2020,13 +2038,14 @@ describe("媒体缩略图与内容哈希去重（M2-补丁2）", () => {
     }
   });
 
-  it("E1 上传即生成缩略图：webp 落盘 + 正文 URL 不变（渲染映射见 markdown-media 单测）", async () => {
-    const { url, dedup } = await uploadPng(await solidPng(7));
+  it("E1 上传即生成缩略图：1600px webp 落盘 + 正文 URL 不变（渲染映射见单测）", async () => {
+    // 大图（2000x1200）验证 1600 档位；withoutEnlargement 对 8px 小图无参考性
+    const { url, dedup } = await uploadPng(await largePng(2000, 1200, 7));
     expect(dedup).toBe(false);
-    // A3：返回的仍是原图 URL（thumb/{base}.webp 不出现在 URL 里）
+    // A3：返回的仍是原图 URL（thumb/{base}.w1600.webp 不出现在 URL 里）
     expect(url).toMatch(/^\/uploads\/images\/\d{8}-[0-9a-f]{16}\.png$/);
 
-    const thumbUrl = url.replace(/^\/uploads\/images\//, "/uploads/images/thumb/").replace(/\.png$/, ".webp");
+    const thumbUrl = thumbUrlOf(url);
     const thumbPath = diskPathOf(thumbUrl);
     leftoverPaths.push(diskPathOf(url), thumbPath);
     expect(fs.existsSync(thumbPath)).toBe(true);
@@ -2034,14 +2053,15 @@ describe("媒体缩略图与内容哈希去重（M2-补丁2）", () => {
     const head = fs.readFileSync(thumbPath).subarray(0, 12);
     expect(head.subarray(0, 4).toString("latin1")).toBe("RIFF");
     expect(head.subarray(8, 12).toString("latin1")).toBe("WEBP");
-    // 缩略图显著小于原图（1x1 无参考性，断言仅"非空"）
-    expect(fs.statSync(thumbPath).size).toBeGreaterThan(0);
-
+    // M2-补丁3 A1：档位 1600 —— 2000x1200 → 1600x960（最长边 1600，fit inside）
+    const meta = await sharpMod!.default(fs.readFileSync(thumbPath)).metadata();
+    expect(meta.width).toBe(1600);
+    expect(meta.height).toBe(960);
   });
 
-  it("E2 惰性生成：删 thumb 后请求缩略图 URL → 200 且重新落盘", async () => {
+  it("E2 惰性生成：删 thumb 后请求缩略图 URL → 200 且重新落盘；旧命名不再被读取", async () => {
     const { url } = await uploadPng(await solidPng(11));
-    const thumbUrl = url.replace(/^\/uploads\/images\//, "/uploads/images/thumb/").replace(/\.png$/, ".webp");
+    const thumbUrl = thumbUrlOf(url);
     const thumbPath = diskPathOf(thumbUrl);
     leftoverPaths.push(diskPathOf(url), thumbPath);
     expect(fs.existsSync(thumbPath)).toBe(true);
@@ -2052,25 +2072,34 @@ describe("媒体缩略图与内容哈希去重（M2-补丁2）", () => {
     expect(res.headers.get("content-type")).toBe("image/webp");
     expect(fs.existsSync(thumbPath)).toBe(true); // 惰性生成已落盘
 
+    // M2-补丁3 D1/A2：旧 640px 档命名 {base}.webp 不再被读取 → 404
+    const legacyUrl = thumbUrl.replace(/\.w1600\.webp$/, ".webp");
+    const legacy = await req(legacyUrl, {}, { useJar: false });
+    expect(legacy.status).toBe(404);
+
     // fail-closed：找不到同名原图的 thumb 请求 → 404，不生成任何文件
-    const missing = await req("/uploads/images/thumb/20990101-00000000.webp", {}, { useJar: false });
+    const missing = await req("/uploads/images/thumb/20990101-00000000.w1600.webp", {}, { useJar: false });
     expect(missing.status).toBe(404);
   });
 
-  it("E6 安全回归：videos thumb / 路径穿越 / comfy 一律 404", async () => {
+  it("E6 安全回归：videos thumb / 旧命名 / 路径穿越 / 非 webp 一律 404", async () => {
     // 视频无缩略图
     expect(
-      (await req("/uploads/videos/thumb/x.webp", {}, { useJar: false })).status
+      (await req("/uploads/videos/thumb/x.w1600.webp", {}, { useJar: false })).status
+    ).toBe(404);
+    // 旧 640px 档命名 {base}.webp 不再被读取（M2-补丁3 A2，fail-closed）
+    expect(
+      (await req("/uploads/images/thumb/x.webp", {}, { useJar: false })).status
     ).toBe(404);
     // 路径穿越（编码后的 ../ 会被路由分段拆开或被白名单拒绝）
     expect(
       (
-        await req("/uploads/images/thumb/..%2F..%2Fcomfy%2Fx.webp", {}, { useJar: false })
+        await req("/uploads/images/thumb/..%2F..%2Fcomfy%2Fx.w1600.webp", {}, { useJar: false })
       ).status
     ).toBe(404);
     // 非 webp 后缀拒绝
     expect(
-      (await req("/uploads/images/thumb/x.png", {}, { useJar: false })).status
+      (await req("/uploads/images/thumb/x.w1600.png", {}, { useJar: false })).status
     ).toBe(404);
   });
 
@@ -2091,10 +2120,6 @@ describe("媒体缩略图与内容哈希去重（M2-补丁2）", () => {
     expect(different.url).not.toBe(first.url);
     leftoverPaths.push(diskPathOf(different.url), diskPathOf(thumbUrlOf(different.url)));
   });
-
-  function thumbUrlOf(url: string): string {
-    return url.replace(/^\/uploads\/images\//, "/uploads/images/thumb/").replace(/\.png$/, ".webp");
-  }
 });
 
 describe("改密后吊销会话（会破坏登录态，放最后段执行并恢复）", () => {
