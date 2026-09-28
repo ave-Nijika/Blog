@@ -69,6 +69,9 @@ async function req(
     headers.set("cookie", cookieHeader());
   }
   const res = await fetch(`${BASE}${pathname}`, { ...init, headers, redirect: "manual" });
+  if (process.env.DEBUG_COOKIES && (res.status === 401 || res.headers.getSetCookie().length)) {
+    console.error(`[dbg] ${pathname} -> ${res.status} setCookie=${JSON.stringify(res.headers.getSetCookie())} jarKeys=${[...jar.keys()].join(",")}`);
+  }
   if (useJar) {
     for (const line of res.headers.getSetCookie()) {
       const [pair] = line.split(";");
@@ -1146,6 +1149,8 @@ describe("媒体上传与删除联动（M1-补丁1）", () => {
   const uploadedUrls: string[] = [];
 
   function minimalPng(): Buffer {
+    // 尾部随机字节：内容哈希去重（M2-补丁2 C1）按内容识别同文件，
+    // 测试夹具必须互异才不会被合并为同一 URL
     const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const ihdrData = Buffer.alloc(13, 0);
     ihdrData.writeUInt32BE(1, 0);
@@ -1159,14 +1164,14 @@ describe("媒体上传与删除联动（M1-补丁1）", () => {
       Buffer.from([0, 0, 0, 0]),
     ]);
     const iend = Buffer.concat([Buffer.from([0, 0, 0, 0]), Buffer.from("IEND"), Buffer.from([0xae, 0x42, 0x60, 0x82])]);
-    return Buffer.concat([sig, ihdr, iend]);
+    return Buffer.concat([sig, ihdr, iend, randomBytes(8)]);
   }
 
   function minimalWebm(): Buffer {
-    // EBML 头签名（魔数校验只看前 4 字节）+ 填充
+    // EBML 头签名（魔数校验只看前 4 字节）+ 随机填充（内容互异，同上）
     return Buffer.concat([
       Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
-      Buffer.alloc(64, 0x42),
+      randomBytes(48),
     ]);
   }
 
@@ -1284,8 +1289,8 @@ describe("媒体上传与删除联动（M1-补丁1）", () => {
     expect(body.kind).toBe("image");
     expect(body.mime).toBe("image/png");
     expect(body.size).toBe(minimalPng().length);
-    // A5：文件名只由服务端生成 {YYYYMMDD}-{8位随机}.{ext}，无客户端可控成分
-    expect(body.url).toMatch(/^\/uploads\/images\/\d{8}-[0-9a-f]{8}\.png$/);
+    // A5/C1：文件名只由服务端生成 {YYYYMMDD}-{sha256前16位}.{ext}，无客户端可控成分
+    expect(body.url).toMatch(/^\/uploads\/images\/\d{8}-[0-9a-f]{16}\.png$/);
     uploadedUrls.push(body.url);
 
     // 落盘存在
@@ -1306,7 +1311,7 @@ describe("媒体上传与删除联动（M1-补丁1）", () => {
     const body = (await res.json()) as { ok: boolean; url: string; kind: string };
     expect(body.ok).toBe(true);
     expect(body.kind).toBe("video");
-    expect(body.url).toMatch(/^\/uploads\/videos\/\d{8}-[0-9a-f]{8}\.webm$/);
+    expect(body.url).toMatch(/^\/uploads\/videos\/\d{8}-[0-9a-f]{16}\.webm$/);
     uploadedUrls.push(body.url);
     expect(fs.existsSync(diskPathOf(body.url))).toBe(true);
   });
@@ -1466,6 +1471,8 @@ describe("媒体删除闭环（M1-补丁2）", () => {
   const createdArticleIds: string[] = [];
 
   function minimalPng(): Buffer {
+    // 尾部随机字节：内容哈希去重（M2-补丁2 C1）按内容识别同文件，
+    // 测试夹具必须互异才不会被合并为同一 URL
     const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const ihdrData = Buffer.alloc(13, 0);
     ihdrData.writeUInt32BE(1, 0);
@@ -1483,13 +1490,13 @@ describe("媒体删除闭环（M1-补丁2）", () => {
       Buffer.from("IEND"),
       Buffer.from([0xae, 0x42, 0x60, 0x82]),
     ]);
-    return Buffer.concat([sig, ihdr, iend]);
+    return Buffer.concat([sig, ihdr, iend, randomBytes(8)]);
   }
 
   function minimalWebm(): Buffer {
     return Buffer.concat([
       Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
-      Buffer.alloc(48, 0x42),
+      randomBytes(48),
     ]);
   }
 
@@ -1807,6 +1814,7 @@ describe("媒体删除排除自身（M2-补丁1 B2 删除语义修正）", () =>
   const createdArticleIds: string[] = [];
 
   function minimalPng(): Buffer {
+    // 尾部随机字节：内容哈希去重下保证各用例文件互异（不互相污染引用计数）
     const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const ihdrData = Buffer.alloc(13, 0);
     ihdrData.writeUInt32BE(1, 0);
@@ -1824,7 +1832,7 @@ describe("媒体删除排除自身（M2-补丁1 B2 删除语义修正）", () =>
       Buffer.from("IEND"),
       Buffer.from([0xae, 0x42, 0x60, 0x82]),
     ]);
-    return Buffer.concat([sig, ihdr, iend]);
+    return Buffer.concat([sig, ihdr, iend, randomBytes(8)]);
   }
 
   function diskPathOf(url: string): string {
@@ -1959,6 +1967,134 @@ describe("媒体删除排除自身（M2-补丁1 B2 删除语义修正）", () =>
     });
     expect(fs.existsSync(diskPathOf(url))).toBe(false);
   });
+});
+
+describe("媒体缩略图与内容哈希去重（M2-补丁2）", () => {
+  /** 测试创建的文件（原图 + 派生 thumb），afterAll 兜底清理 */
+  const leftoverPaths: string[] = [];
+
+  let sharpMod: typeof import("sharp") | null = null;
+  async function solidPng(byte: number): Promise<Buffer> {
+    // sharp 生成合法 PNG；byte 决定像素色值 → 内容可变（去重测试用不同内容）
+    sharpMod = sharpMod ?? ((await import("sharp")) as typeof import("sharp"));
+    return sharpMod
+      .default({
+        create: {
+          width: 8,
+          height: 8,
+          channels: 3,
+          background: { r: byte, g: byte, b: byte },
+        },
+      })
+      .png()
+      .toBuffer();
+  }
+
+  function diskPathOf(url: string): string {
+    return path.join(process.cwd(), "public", url);
+  }
+
+  async function uploadPng(bytes: Buffer): Promise<{
+    url: string;
+    dedup: boolean;
+  }> {
+    const form = new FormData();
+    form.append("file", new Blob([bytes], { type: "image/png" }), "m2p2.png");
+    const res = await req("/api/admin/upload", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: form,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { url: string; dedup: boolean };
+    return { url: body.url, dedup: body.dedup };
+  }
+
+  afterAll(async () => {
+    for (const p of leftoverPaths) {
+      try {
+        fs.rmSync(p, { force: true });
+      } catch {
+        /* best effort */
+      }
+    }
+  });
+
+  it("E1 上传即生成缩略图：webp 落盘 + 正文 URL 不变（渲染映射见 markdown-media 单测）", async () => {
+    const { url, dedup } = await uploadPng(await solidPng(7));
+    expect(dedup).toBe(false);
+    // A3：返回的仍是原图 URL（thumb/{base}.webp 不出现在 URL 里）
+    expect(url).toMatch(/^\/uploads\/images\/\d{8}-[0-9a-f]{16}\.png$/);
+
+    const thumbUrl = url.replace(/^\/uploads\/images\//, "/uploads/images/thumb/").replace(/\.png$/, ".webp");
+    const thumbPath = diskPathOf(thumbUrl);
+    leftoverPaths.push(diskPathOf(url), thumbPath);
+    expect(fs.existsSync(thumbPath)).toBe(true);
+    // webp 魔数：RIFF....WEBP
+    const head = fs.readFileSync(thumbPath).subarray(0, 12);
+    expect(head.subarray(0, 4).toString("latin1")).toBe("RIFF");
+    expect(head.subarray(8, 12).toString("latin1")).toBe("WEBP");
+    // 缩略图显著小于原图（1x1 无参考性，断言仅"非空"）
+    expect(fs.statSync(thumbPath).size).toBeGreaterThan(0);
+
+  });
+
+  it("E2 惰性生成：删 thumb 后请求缩略图 URL → 200 且重新落盘", async () => {
+    const { url } = await uploadPng(await solidPng(11));
+    const thumbUrl = url.replace(/^\/uploads\/images\//, "/uploads/images/thumb/").replace(/\.png$/, ".webp");
+    const thumbPath = diskPathOf(thumbUrl);
+    leftoverPaths.push(diskPathOf(url), thumbPath);
+    expect(fs.existsSync(thumbPath)).toBe(true);
+    fs.rmSync(thumbPath); // 模拟存量图/被清理的 thumb
+
+    const res = await req(thumbUrl, {}, { useJar: false });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/webp");
+    expect(fs.existsSync(thumbPath)).toBe(true); // 惰性生成已落盘
+
+    // fail-closed：找不到同名原图的 thumb 请求 → 404，不生成任何文件
+    const missing = await req("/uploads/images/thumb/20990101-00000000.webp", {}, { useJar: false });
+    expect(missing.status).toBe(404);
+  });
+
+  it("E6 安全回归：videos thumb / 路径穿越 / comfy 一律 404", async () => {
+    // 视频无缩略图
+    expect(
+      (await req("/uploads/videos/thumb/x.webp", {}, { useJar: false })).status
+    ).toBe(404);
+    // 路径穿越（编码后的 ../ 会被路由分段拆开或被白名单拒绝）
+    expect(
+      (
+        await req("/uploads/images/thumb/..%2F..%2Fcomfy%2Fx.webp", {}, { useJar: false })
+      ).status
+    ).toBe(404);
+    // 非 webp 后缀拒绝
+    expect(
+      (await req("/uploads/images/thumb/x.png", {}, { useJar: false })).status
+    ).toBe(404);
+  });
+
+  it("E3 内容哈希去重：同内容同 URL 单文件；不同内容不同文件", async () => {
+    const a = await solidPng(23);
+    const first = await uploadPng(a);
+    expect(first.dedup).toBe(false);
+    const second = await uploadPng(a);
+    expect(second.dedup).toBe(true);
+    expect(second.url).toBe(first.url); // 同 URL
+    // 盘上单文件：同名文件只有一个（哈希命名）
+    const pathA = diskPathOf(first.url);
+    leftoverPaths.push(pathA, diskPathOf(thumbUrlOf(first.url)));
+    expect(fs.existsSync(pathA)).toBe(true);
+
+    const different = await uploadPng(await solidPng(99));
+    expect(different.dedup).toBe(false);
+    expect(different.url).not.toBe(first.url);
+    leftoverPaths.push(diskPathOf(different.url), diskPathOf(thumbUrlOf(different.url)));
+  });
+
+  function thumbUrlOf(url: string): string {
+    return url.replace(/^\/uploads\/images\//, "/uploads/images/thumb/").replace(/\.png$/, ".webp");
+  }
 });
 
 describe("改密后吊销会话（会破坏登录态，放最后段执行并恢复）", () => {

@@ -20,6 +20,7 @@ import {
   removeMediaBlockAt,
   renderVideoSyntax,
   splitBodyBlocks,
+  thumbnailUrlFor,
 } from "@/lib/media";
 
 describe("扩展名 / MIME 判定", () => {
@@ -324,5 +325,25 @@ describe("@video 语法预处理（renderVideoSyntax）", () => {
     const rendered = renderVideoSyntax(body);
     expect(rendered.split("\n")[0]).toBe("![演示](/uploads/videos/demo.mp4)");
     expect(rendered).toContain("@video[教学样例](/uploads/videos/doc.mp4)");
+  });
+});
+
+describe("缩略图 URL 映射（thumbnailUrlFor，M2-补丁2 A3）", () => {
+  it("站内图片 → /uploads/images/thumb/{base}.webp", () => {
+    expect(thumbnailUrlFor("/uploads/images/20260928-abcd1234.jpg")).toBe(
+      "/uploads/images/thumb/20260928-abcd1234.webp"
+    );
+    expect(thumbnailUrlFor("/uploads/images/a.webp")).toBe(
+      "/uploads/images/thumb/a.webp"
+    );
+  });
+
+  it("非 images 路径 / 外链 / 多级路径返回 null", () => {
+    expect(thumbnailUrlFor("/uploads/videos/clip.mp4")).toBeNull();
+    expect(thumbnailUrlFor("https://example.com/a.png")).toBeNull();
+    // thumb 自身已是二级路径，不再映射（无 thumb of thumb）
+    expect(thumbnailUrlFor("/uploads/images/thumb/a.webp")).toBeNull();
+    expect(thumbnailUrlFor("/uploads/images/../../etc/passwd")).toBeNull();
+    expect(thumbnailUrlFor("")).toBeNull();
   });
 });

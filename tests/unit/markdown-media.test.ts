@@ -70,22 +70,36 @@ describe("共享渲染配置：@video 与图片（F5）", () => {
     expect(video!.getAttribute("src")).toBe("/uploads/videos/20260101-abcd1234.mp4");
   });
 
-  it("站内图片渲染真实 <img>，点击打开灯箱（遮罩 + 原图）", () => {
+  it("站内图片渲染真实 <img>（缩略图），点击灯箱加载原图（M2-补丁2 D1）", () => {
     const { container } = renderMarkdown(
       "![截图](/uploads/images/20260101-abcd1234.png)"
     );
     const img = container.querySelector("img");
     expect(img).toBeTruthy();
-    expect(img!.getAttribute("src")).toBe("/uploads/images/20260101-abcd1234.png");
+    // 默认展示走缩略图（thumbnailUrlFor 映射；缺失时由 /uploads 路由惰性生成）
+    expect(img!.getAttribute("src")).toBe(
+      "/uploads/images/thumb/20260101-abcd1234.webp"
+    );
     expect(img!.getAttribute("alt")).toBe("截图");
     fireEvent.click(img!);
     const dialog = document.body.querySelector('[role="dialog"]');
     expect(dialog).toBeTruthy();
     const lightboxImg = dialog!.querySelector("img");
-    expect(lightboxImg!.getAttribute("src")).toBe("/uploads/images/20260101-abcd1234.png");
+    // 灯箱始终加载原图（A3）
+    expect(lightboxImg!.getAttribute("src")).toBe(
+      "/uploads/images/20260101-abcd1234.png"
+    );
     // 点击遮罩关闭
     fireEvent.click(dialog!);
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("D1：视频/外链图片不映射缩略图（直接原图）", () => {
+    const { container } = renderMarkdown(
+      "![外链](https://example.com/a.png)"
+    );
+    const img = container.querySelector("img");
+    expect(img!.getAttribute("src")).toBe("https://example.com/a.png");
   });
 
   it("段落内的行内图片不破坏 <p> 结构（span 行内包装，无 div 进 p）", () => {

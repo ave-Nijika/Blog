@@ -38,6 +38,7 @@ import {
   moveMediaBlockAt,
   removeMediaBlockAt,
   renderVideoSyntax,
+  thumbnailUrlFor,
   type MediaBlockInfo,
   type MediaKind,
 } from "@/lib/media";
@@ -918,9 +919,16 @@ function MediaPanel({
               {item.kind === "image" ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
-                  src={item.url}
+                  src={thumbnailUrlFor(item.url) ?? item.url}
                   alt=""
                   loading="lazy"
+                  onError={(e) => {
+                    // B5/A4：缩略图缺失降级原图（一次性切 src）
+                    const original = thumbnailUrlFor(item.url);
+                    if (original && e.currentTarget.src.endsWith(thumbnailUrlFor(item.url)!)) {
+                      e.currentTarget.src = item.url;
+                    }
+                  }}
                   className="h-10 w-16 shrink-0 rounded border border-slate-200 object-cover dark:border-slate-700"
                 />
               ) : (
