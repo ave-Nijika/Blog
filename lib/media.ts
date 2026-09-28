@@ -307,6 +307,22 @@ export function isVideoUrl(url: string): boolean {
   return /\.(mp4|webm)$/i.test(bare);
 }
 
+/**
+ * 站内图片 → sharp 缩略图 URL 映射（M2-补丁2 A3，渲染层纯函数）。
+ * 正文存的仍是原图 URL；本函数只做"展示地址"映射：
+ *   /uploads/images/{name}.{ext} → /uploads/images/thumb/{name}.webp
+ * 非 images 路径（视频/外链/已带 thumb）返回 null（调用方回退原图）。
+ * thumb 文件不存在时由 /uploads 路由惰性生成（A2），渲染层无需探存在性。
+ */
+export function thumbnailUrlFor(url: string): string | null {
+  const m = url.match(/^\/uploads\/images\/([A-Za-z0-9._-]+)$/);
+  if (!m) return null;
+  const fileName = m[1];
+  const dot = fileName.lastIndexOf(".");
+  const base = dot > 0 ? fileName.slice(0, dot) : fileName;
+  return `/uploads/images/thumb/${base}.webp`;
+}
+
 // ---------------------------------------------------------------------------
 // @video 自定义语法 → 标准 markdown 图片语法（渲染前预处理）
 // ---------------------------------------------------------------------------

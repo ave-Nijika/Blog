@@ -18,7 +18,7 @@
  *   - 对外只暴露 /uploads/... 相对 URL，不返回服务端绝对路径。
  */
 import { promises as fs } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import type { MediaKind } from "@/lib/media";
 
@@ -55,37 +55,107 @@ export function parseUploadsUrl(url: string): { kind: MediaKind; fileName: strin
 }
 
 /**
- * A5：服务端生成安全文件名 {YYYYMMDD}-{8位随机}.{ext}。
- * 日期取服务器本地时间；随机 4 字节十六进制；ext 由 MIME 白名单推导。
+ * 服务端生成安全文件名 {YYYYMMDD}-{sha256前16位}.{ext}（M2-补丁2 C1，
+ * 取代 8 位随机）。日期取服务器本地时间；hash 由内容决定——同内容同名
+ * （同日上传）即天然去重键；历史 `-8位随机` 文件名继续有效（C3，
+ * parseUploadsUrl 文件名规则本就放宽为 [A-Za-z0-9._-]+）。
  */
-export function generateMediaFileName(ext: string, now = new Date()): string {
+export function generateMediaFileName(ext: string, contentHash: string, now = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   const yyyymmdd = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
-  return `${yyyymmdd}-${randomBytes(4).toString("hex")}.${ext}`;
+  return `${yyyymmdd}-${contentHash}.${ext}`;
 }
 
-/** 落盘：目录不存在则创建；随机名撞车时重试（上限 5 次，概率可忽略） */
+/**
+ * 落盘 + 内容哈希去重（M2-补丁2 C1）：先算 sha256 → 目标文件名命中即复用
+ * （返回已有 URL，不落新盘，dedup=true 供调用方写 INFO 日志）；未命中才写盘。
+ */
 export async function saveMediaFile(
   buffer: Buffer,
   ext: string,
   kind: MediaKind
-): Promise<{ fileName: string; url: string; absolutePath: string }> {
+): Promise<{ fileName: string; url: string; absolutePath: string; dedup: boolean }> {
   const dir = uploadsDirFor(kind);
   await fs.mkdir(dir, { recursive: true });
-  let fileName = "";
-  let absolutePath = "";
-  for (let attempt = 0; attempt < 5; attempt++) {
-    fileName = generateMediaFileName(ext);
-    absolutePath = path.join(dir, fileName);
-    try {
-      await fs.access(absolutePath);
-      continue; // 已存在（撞车）→ 换个随机名
-    } catch {
+  const contentHash = createHash("sha256").update(buffer).digest("hex").slice(0, 16);
+  const fileName = generateMediaFileName(ext, contentHash);
+  const absolutePath = path.join(dir, fileName);
+  try {
+    await fs.access(absolutePath);
+    // 同内容已存在 → 复用（同 URL = 同文件，多处引用共同持有，C2）
+    return {
+      fileName,
+      url: uploadsUrlFor(kind, fileName),
+      absolutePath,
+      dedup: true,
+    };
+  } catch {
+    // 未命中 → 落新盘
+  }
+  await fs.writeFile(absolutePath, buffer);
+  return { fileName, url: uploadsUrlFor(kind, fileName), absolutePath, dedup: false };
+}
+
+/**
+ * 生成图片缩略图（M2-补丁2 A1）：最长边 640px、webp 质量 78，落
+ * uploads/images/thumb/{同名}.webp（GIF 动图保留动画帧）。
+ * 生成失败由调用方决定是否阻塞（上传路径：warn 不阻塞；惰性路径：抛错→404）。
+ */
+export async function generateImageThumb(
+  buffer: Buffer,
+  fileName: string
+): Promise<string> {
+  const sharp = (await import("sharp")).default;
+  const thumbDir = path.join(uploadsDirFor("image"), "thumb");
+  await fs.mkdir(thumbDir, { recursive: true });
+  const base = fileName.replace(/\.[A-Za-z0-9]+$/, "");
+  const thumbPath = path.join(thumbDir, `${base}.webp`);
+  // animated: true —— GIF 动图缩略图保留全部帧（静态图无影响）
+  await sharp(buffer, { animated: true })
+    .rotate()
+    .resize({ width: 640, height: 640, fit: "inside", withoutEnlargement: true })
+    .webp({ quality: 78 })
+    .toFile(thumbPath);
+  return thumbPath;
+}
+
+/**
+ * A2 惰性生成：thumb URL（/uploads/images/thumb/{base}.webp）对应原图存在
+ * 但缩略图缺失时，按 basename 在 images 目录内定位原图并生成。
+ * fail-closed：base 含路径穿越成分/找不到原图/生成失败 → 返回 null（调用方 404）。
+ * 只在 images 目录内活动，comfy/ 永不触碰。
+ */
+export async function ensureImageThumbForBase(base: string): Promise<string | null> {
+  if (!/^[A-Za-z0-9._-]+$/.test(base) || base.includes("..")) return null;
+  const imagesDir = uploadsDirFor("image");
+  let entries: string[] = [];
+  try {
+    entries = await fs.readdir(imagesDir);
+  } catch {
+    return null;
+  }
+  // 同名原图：扩展名限定上传白名单（thumb 自身 .webp 也可能是某次上传的
+  // 原图——webp 在白名单内，天然支持"webp 原图的 thumb"自嵌套场景）
+  const IMAGE_EXTS = ["jpg", "jpeg", "png", "gif", "webp"];
+  let originalName: string | null = null;
+  for (const name of entries) {
+    const dot = name.lastIndexOf(".");
+    if (dot <= 0) continue;
+    const nameBase = name.slice(0, dot);
+    const ext = name.slice(dot + 1).toLowerCase();
+    if (nameBase === base && IMAGE_EXTS.includes(ext)) {
+      originalName = name;
       break;
     }
   }
-  await fs.writeFile(absolutePath, buffer);
-  return { fileName, url: uploadsUrlFor(kind, fileName), absolutePath };
+  if (!originalName) return null;
+  try {
+    const buffer = await fs.readFile(path.join(imagesDir, originalName));
+    return await generateImageThumb(buffer, originalName);
+  } catch (error) {
+    console.warn("[media-storage] lazy thumb generation failed:", originalName, error);
+    return null;
+  }
 }
 
 /**
@@ -103,6 +173,16 @@ export async function deleteUploadFilesByUrls(urls: string[]): Promise<string[]>
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ENOENT") throw error;
+    }
+    // 派生缩略图顺带清理（M2-补丁2）：纯派生物，原图已删则 thumb 无意义；
+    // 不存在则忽略（历史文件/视频本就没有 thumb）
+    if (parsed.kind === "image") {
+      const base = parsed.fileName.replace(/\.[A-Za-z0-9]+$/, "");
+      await fs
+        .unlink(path.join(uploadsDirFor("image"), "thumb", `${base}.webp`))
+        .catch((error) => {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        });
     }
   }
   return deleted;

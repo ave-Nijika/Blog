@@ -21,7 +21,7 @@ import {
   mediaKindByExtension,
   videoMimeByExt,
 } from "@/lib/media";
-import { saveMediaFile } from "@/lib/media-storage";
+import { generateImageThumb, saveMediaFile } from "@/lib/media-storage";
 import { AUDIT_ACTIONS, logAudit } from "@/lib/audit";
 
 export const runtime = "nodejs";
@@ -143,15 +143,39 @@ export async function POST(req: NextRequest) {
     return jsonError(415, "文件内容与扩展名不符，已拒收");
   }
 
-  // A5 落盘：服务端生成文件名，不含任何客户端可控成分
+  // A5 落盘：服务端生成文件名（内容 sha256 前 16 位，M2-补丁2 C1 去重），
+  // 不含任何客户端可控成分
   try {
     const stored = await saveMediaFile(buffer, ext, kind);
+    if (stored.dedup) {
+      // C1：同内容命中已有文件 → 复用，不落新盘
+      console.info(
+        `[upload.dedup] ${stored.fileName} 内容哈希命中，复用已有文件（${kind}，${buffer.byteLength}B）`
+      );
+    } else if (kind === "image") {
+      // A1：图片上传成功后生成缩略图；失败不阻塞上传（原图照常返回）
+      try {
+        await generateImageThumb(buffer, stored.fileName);
+      } catch (thumbError) {
+        console.warn(
+          "[admin/upload] thumbnail generation failed, fallback to original:",
+          stored.fileName,
+          thumbError
+        );
+      }
+    }
     await logAudit({
       adminId: session.id,
       action: AUDIT_ACTIONS.MEDIA_UPLOAD,
       targetType: "media",
       targetId: stored.url,
-      metadata: { fileName: stored.fileName, kind, size: buffer.byteLength, mime: declaredMime },
+      metadata: {
+        fileName: stored.fileName,
+        kind,
+        size: buffer.byteLength,
+        mime: declaredMime,
+        dedup: stored.dedup,
+      },
     });
     return new Response(
       JSON.stringify({
@@ -160,6 +184,7 @@ export async function POST(req: NextRequest) {
         kind,
         size: buffer.byteLength,
         mime: declaredMime,
+        dedup: stored.dedup,
       }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );

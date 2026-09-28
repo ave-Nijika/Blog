@@ -1,7 +1,11 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
-import { getUploadsRoot, parseUploadsUrl } from "@/lib/media-storage";
+import {
+  ensureImageThumbForBase,
+  getUploadsRoot,
+  parseUploadsUrl,
+} from "@/lib/media-storage";
 
 /**
  * /uploads/... 静态服务路由（紧急修复 2026-09-28）。
@@ -12,6 +16,11 @@ import { getUploadsRoot, parseUploadsUrl } from "@/lib/media-storage";
  *
  * 形态与旧的 public 静态托管一致：URL 仍是 /uploads/{images|videos}/{文件名}，
  * 正文 markdown 无需任何改动。
+ *
+ * 缩略图（M2-补丁2 A2）：/uploads/images/thumb/{base}.webp 请求时若 thumb
+ * 文件不存在且同名原图存在 → 惰性生成一次再返回（comfy 惰性生成同款模式）；
+ * 仅 images 有 thumb（视频无），fail-closed：base 白名单校验 + 同名原图必须
+ * 存在，穿越/不存在一律 404，comfy/ 永不触碰。
  *
  * 安全：
  *   - 路径穿越防护：先经 parseUploadsUrl 白名单校验（仅 images/videos 两级 +
@@ -56,11 +65,49 @@ async function resolveUploadFile(
   return { absolutePath, mime };
 }
 
+/**
+ * A2：thumb 请求解析（仅 /uploads/images/thumb/{base}.webp）。
+ * thumb 文件存在 → 直接返回；缺失且同名原图存在 → 惰性生成后返回；
+ * 其余（穿越、视频 thumb、找不到原图）→ null（404，fail-closed）。
+ */
+async function resolveThumbFile(
+  segments: string[]
+): Promise<{ absolutePath: string; mime: string } | null> {
+  if (
+    segments.length !== 3 ||
+    segments[0] !== "images" ||
+    segments[1] !== "thumb" ||
+    !segments[2].endsWith(".webp")
+  ) {
+    return null; // videos 无 thumb；更深层级/其他目录一律拒绝
+  }
+  const thumbName = segments[2];
+  if (!/^[A-Za-z0-9._-]+\.webp$/.test(thumbName)) return null;
+  const root = path.resolve(getUploadsRoot());
+  const thumbPath = path.resolve(root, "images", "thumb", thumbName);
+  if (!thumbPath.startsWith(root + path.sep)) return null; // 二次穿越校验
+
+  try {
+    await fs.access(thumbPath);
+    return { absolutePath: thumbPath, mime: "image/webp" };
+  } catch {
+    // thumb 缺失 → 尝试惰性生成（ensureImageThumbForBase 内部再做 basename
+    // 白名单与同名原图存在性校验，找不到原图返回 null → 404）
+    const base = thumbName.slice(0, -".webp".length);
+    const generated = await ensureImageThumbForBase(base);
+    if (!generated) return null;
+    const finalPath = path.resolve(generated);
+    if (!finalPath.startsWith(root + path.sep)) return null;
+    return { absolutePath: finalPath, mime: "image/webp" };
+  }
+}
+
 async function handle(req: NextRequest, segments: string[]): Promise<Response> {
   if (req.method !== "GET" && req.method !== "HEAD") {
     return new NextResponse("Method Not Allowed", { status: 405 });
   }
-  const resolved = await resolveUploadFile(segments);
+  const resolved =
+    (await resolveUploadFile(segments)) ?? (await resolveThumbFile(segments));
   if (!resolved) {
     return new NextResponse("Not Found", { status: 404 });
   }
