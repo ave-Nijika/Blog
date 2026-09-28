@@ -19,13 +19,14 @@
  *     （只动正文不动服务器文件，文件清理由删文时的引用计数统一负责）
  *   - 校验：title 非空、slug 合法、status 合法由服务端最终把关
  */
-import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
 import { fetchWithCsrf } from "@/lib/fetchWithCsrf";
+import { RichTextEditor } from "@/lib/editor/RichTextEditor";
 import { getMarkdownComponents } from "@/lib/markdown-components";
 import {
   altFromFileName,
@@ -64,6 +65,18 @@ type Props = {
 };
 
 const SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+/** C2：编辑器形态记入 localStorage，下次进入保持；默认富文本 */
+const EDITOR_MODE_STORAGE_KEY = "plana-post-editor-mode";
+
+function readStoredEditorMode(): "richtext" | "source" {
+  try {
+    const v = localStorage.getItem(EDITOR_MODE_STORAGE_KEY);
+    return v === "source" ? "source" : "richtext";
+  } catch {
+    return "richtext";
+  }
+}
 
 function toInputDateTime(iso: string | null | undefined): string {
   if (!iso) return "";
@@ -133,6 +146,33 @@ export function PostEditor({ initial, mode }: Props) {
   // 插入完成后把光标恢复到媒体块之后（body 变化的 effect 里消费）
   const restoreCursorRef = useRef<number | null>(null);
   const uploadErrorTimerRef = useRef<number | null>(null);
+
+  // ---- 双形态编辑器（M2-补丁1 C）：富文本(Tiptap) ⇄ 源码(textarea) ----
+  // 回滚开关即本切换本身：Tiptap 有任何问题，切回源码即回到 M1-补丁1 行为。
+  const [editorMode, setEditorMode] = useState<"richtext" | "source">(
+    () => readStoredEditorMode()
+  );
+  const richSyncRef = useRef<((md: string) => void) | null>(null);
+  const registerRichSync = useCallback((fn: (md: string) => void) => {
+    richSyncRef.current = fn;
+  }, []);
+
+  /** 统一的正文外部变更入口（媒体面板/彻底删除）：更新 ref + state 并回灌富文本编辑器 */
+  function applyBodyChange(next: string) {
+    bodyTextRef.current = next;
+    setValues((prev) => ({ ...prev, body: next }));
+    richSyncRef.current?.(next);
+  }
+
+  function switchEditorMode(next: "richtext" | "source") {
+    if (next === editorMode) return;
+    setEditorMode(next);
+    try {
+      localStorage.setItem(EDITOR_MODE_STORAGE_KEY, next);
+    } catch {
+      /* 隐私模式等：形态记忆不可用不影响功能 */
+    }
+  }
 
   const showUploadError = (message: string) => {
     setUploadError(message);
@@ -308,7 +348,12 @@ export function PostEditor({ initial, mode }: Props) {
       const res = await fetchWithCsrf("/api/admin/media", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
+        // B2：排除正在编辑的文章自身（磁盘旧版 md 的引用不算数——
+        // 修"图在本文档里就永远删不掉"的语义错误；新建文章无 id 不传）
+        body: JSON.stringify({
+          url,
+          ...(mode === "edit" && values.id ? { excludeArticleId: values.id } : {}),
+        }),
       });
       const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
@@ -332,8 +377,7 @@ export function PostEditor({ initial, mode }: Props) {
         if (last === -1) break;
         body = removeMediaBlockAt(body, last);
       }
-      bodyTextRef.current = body;
-      update("body", body);
+      applyBodyChange(body);
     } catch {
       showUploadError(`「${label}」删除失败：网络异常，请重试`);
     }
@@ -632,81 +676,137 @@ export function PostEditor({ initial, mode }: Props) {
         <div className="flex flex-col gap-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
-              正文（Markdown）
+              正文{editorMode === "richtext" ? "（所见即所得）" : "（Markdown 源码）"}
               <span className="ml-2 font-normal text-xs text-slate-400 dark:text-slate-500">
-                支持粘贴 / 拖入图片视频直接上传
+                {editorMode === "richtext"
+                  ? "支持粘贴 / 拖入图片视频直接上传；拖动媒体可调整位置"
+                  : "支持粘贴 / 拖入图片视频直接上传"}
               </span>
             </span>
-            {/* B1：工具栏图片/视频按钮（B4 loading 态） */}
-            <div className="flex gap-1.5">
-              <button
-                type="button"
-                onClick={() => imageInputRef.current?.click()}
-                disabled={uploadDisabled}
-                className="rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:border-sky-400 hover:text-sky-600 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-sky-500 dark:hover:text-sky-400"
+            <div className="flex items-center gap-1.5">
+              {/* 源码模式保留 M1-补丁1 的图片/视频按钮（富文本模式在编辑器工具栏内） */}
+              {editorMode === "source" ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => imageInputRef.current?.click()}
+                    disabled={uploadDisabled}
+                    className="rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:border-sky-400 hover:text-sky-600 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-sky-500 dark:hover:text-sky-400"
+                  >
+                    {uploadingKind === "image" ? "上传中…" : "🖼 图片"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => videoInputRef.current?.click()}
+                    disabled={uploadDisabled}
+                    className="rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:border-sky-400 hover:text-sky-600 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-sky-500 dark:hover:text-sky-400"
+                  >
+                    {uploadingKind === "video" ? "上传中…" : "🎬 视频"}
+                  </button>
+                </>
+              ) : null}
+              {/* C1/C4：形态切换即回滚开关 */}
+              <div
+                role="tablist"
+                aria-label="编辑器形态"
+                className="flex overflow-hidden rounded-md border border-slate-300 dark:border-slate-700"
               >
-                {uploadingKind === "image" ? "上传中…" : "🖼 图片"}
-              </button>
-              <button
-                type="button"
-                onClick={() => videoInputRef.current?.click()}
-                disabled={uploadDisabled}
-                className="rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:border-sky-400 hover:text-sky-600 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-sky-500 dark:hover:text-sky-400"
-              >
-                {uploadingKind === "video" ? "上传中…" : "🎬 视频"}
-              </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={editorMode === "richtext"}
+                  onClick={() => switchEditorMode("richtext")}
+                  className={
+                    "px-2.5 py-1 text-xs font-medium transition-colors " +
+                    (editorMode === "richtext"
+                      ? "bg-sky-50 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300"
+                      : "bg-white text-slate-600 hover:bg-slate-50 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700")
+                  }
+                >
+                  富文本
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={editorMode === "source"}
+                  onClick={() => switchEditorMode("source")}
+                  className={
+                    "px-2.5 py-1 text-xs font-medium transition-colors " +
+                    (editorMode === "source"
+                      ? "bg-sky-50 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300"
+                      : "bg-white text-slate-600 hover:bg-slate-50 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700")
+                  }
+                >
+                  源码
+                </button>
+              </div>
             </div>
           </div>
 
-          <textarea
-            id="post-body-textarea"
-            ref={bodyRef}
-            value={values.body}
-            onChange={(e) => update("body", e.target.value)}
-            onPaste={onPaste}
-            onDragOver={onDragOver}
-            onDrop={onDrop}
-            rows={showPreview ? 18 : 24}
-            className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-sm shadow-sm focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-          />
+          {editorMode === "richtext" ? (
+            <RichTextEditor
+              initialBody={values.body}
+              onBodyChange={(md) => {
+                bodyTextRef.current = md;
+                update("body", md);
+              }}
+              registerSync={registerRichSync}
+              articleId={mode === "edit" ? values.id : undefined}
+              onNotify={showUploadError}
+            />
+          ) : (
+            <>
+              <textarea
+                id="post-body-textarea"
+                ref={bodyRef}
+                value={values.body}
+                onChange={(e) => update("body", e.target.value)}
+                onPaste={onPaste}
+                onDragOver={onDragOver}
+                onDrop={onDrop}
+                rows={showPreview ? 18 : 24}
+                className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-sm shadow-sm focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+              />
 
-          {/* B4：上传失败反馈（不静默失败） */}
-          {uploadError ? (
-            <div
-              role="alert"
-              className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/40 dark:text-amber-200"
-            >
-              {uploadError}
-            </div>
-          ) : null}
+              {/* B4：上传失败反馈（不静默失败） */}
+              {uploadError ? (
+                <div
+                  role="alert"
+                  className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/40 dark:text-amber-200"
+                >
+                  {uploadError}
+                </div>
+              ) : null}
 
-          {/* B5/D：隐藏的文件选择入口 */}
-          <input
-            ref={imageInputRef}
-            type="file"
-            accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp"
-            multiple
-            className="hidden"
-            onChange={(e) => {
-              const files = Array.from(e.target.files ?? []);
-              const pos = bodyRef.current?.selectionStart ?? values.body.length;
-              e.target.value = ""; // 允许重复选择同一文件
-              void uploadFilesAndInsert(files, pos);
-            }}
-          />
-          <input
-            ref={videoInputRef}
-            type="file"
-            accept="video/mp4,video/webm,.mp4,.webm"
-            multiple
-            className="hidden"
-            onChange={(e) => {
-              const files = Array.from(e.target.files ?? []);
-              const pos = bodyRef.current?.selectionStart ?? values.body.length;
-              e.target.value = "";
-              void uploadFilesAndInsert(files, pos);
-            }}
-          />
+              {/* B5/D：隐藏的文件选择入口 */}
+              <input
+                ref={imageInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  const files = Array.from(e.target.files ?? []);
+                  const pos = bodyRef.current?.selectionStart ?? values.body.length;
+                  e.target.value = ""; // 允许重复选择同一文件
+                  void uploadFilesAndInsert(files, pos);
+                }}
+              />
+              <input
+                ref={videoInputRef}
+                type="file"
+                accept="video/mp4,video/webm,.mp4,.webm"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  const files = Array.from(e.target.files ?? []);
+                  const pos = bodyRef.current?.selectionStart ?? values.body.length;
+                  e.target.value = "";
+                  void uploadFilesAndInsert(files, pos);
+                }}
+              />
+            </>
+          )}
         </div>
         {showPreview ? (
           <Field label="预览" full>
@@ -731,8 +831,8 @@ export function PostEditor({ initial, mode }: Props) {
       {mediaBlocks.length > 0 ? (
         <MediaPanel
           items={mediaBlocks}
-          onMove={(from, to) => update("body", moveMediaBlockAt(values.body, from, to))}
-          onRemove={(index) => update("body", removeMediaBlockAt(values.body, index))}
+          onMove={(from, to) => applyBodyChange(moveMediaBlockAt(values.body, from, to))}
+          onRemove={(index) => applyBodyChange(removeMediaBlockAt(values.body, index))}
           onDeleteFile={(url) => void deleteMediaFile(url)}
         />
       ) : null}
