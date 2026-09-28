@@ -17,10 +17,11 @@ import {
  * 形态与旧的 public 静态托管一致：URL 仍是 /uploads/{images|videos}/{文件名}，
  * 正文 markdown 无需任何改动。
  *
- * 缩略图（M2-补丁2 A2）：/uploads/images/thumb/{base}.webp 请求时若 thumb
- * 文件不存在且同名原图存在 → 惰性生成一次再返回（comfy 惰性生成同款模式）；
- * 仅 images 有 thumb（视频无），fail-closed：base 白名单校验 + 同名原图必须
- * 存在，穿越/不存在一律 404，comfy/ 永不触碰。
+ * 缩略图（M2-补丁2 A2，M2-补丁3 A1/A2 提档）：/uploads/images/thumb/{base}.w1600.webp
+ * 请求时若 thumb 文件不存在且同名原图存在 → 惰性生成一次再返回（comfy 惰性
+ * 生成同款模式）；仅 images 有 thumb（视频无），fail-closed：base 白名单校验
+ * + 规格后缀必须为 .w1600（旧 640px 档命名不再被读取）+ 同名原图必须存在，
+ * 穿越/不存在一律 404，comfy/ 永不触碰。
  *
  * 安全：
  *   - 路径穿越防护：先经 parseUploadsUrl 白名单校验（仅 images/videos 两级 +
@@ -66,9 +67,10 @@ async function resolveUploadFile(
 }
 
 /**
- * A2：thumb 请求解析（仅 /uploads/images/thumb/{base}.webp）。
+ * A2：thumb 请求解析（仅 /uploads/images/thumb/{base}.w1600.webp，M2-补丁3
+ * A2 收紧——旧 640px 档命名 {base}.webp 不再被读取，一律 404）。
  * thumb 文件存在 → 直接返回；缺失且同名原图存在 → 惰性生成后返回；
- * 其余（穿越、视频 thumb、找不到原图）→ null（404，fail-closed）。
+ * 其余（穿越、视频 thumb、无规格后缀、找不到原图）→ null（404，fail-closed）。
  */
 async function resolveThumbFile(
   segments: string[]
@@ -77,12 +79,12 @@ async function resolveThumbFile(
     segments.length !== 3 ||
     segments[0] !== "images" ||
     segments[1] !== "thumb" ||
-    !segments[2].endsWith(".webp")
+    !segments[2].endsWith(".w1600.webp")
   ) {
-    return null; // videos 无 thumb；更深层级/其他目录一律拒绝
+    return null; // videos 无 thumb；旧命名/非 webp/更深层级/其他目录一律拒绝
   }
   const thumbName = segments[2];
-  if (!/^[A-Za-z0-9._-]+\.webp$/.test(thumbName)) return null;
+  if (!/^[A-Za-z0-9._-]+\.w1600\.webp$/.test(thumbName)) return null;
   const root = path.resolve(getUploadsRoot());
   const thumbPath = path.resolve(root, "images", "thumb", thumbName);
   if (!thumbPath.startsWith(root + path.sep)) return null; // 二次穿越校验
@@ -91,8 +93,8 @@ async function resolveThumbFile(
     await fs.access(thumbPath);
     return { absolutePath: thumbPath, mime: "image/webp" };
   } catch {
-    // thumb 缺失 → 尝试惰性生成（ensureImageThumbForBase 内部再做 basename
-    // 白名单与同名原图存在性校验，找不到原图返回 null → 404）
+    // thumb 缺失 → 尝试惰性生成（ensureImageThumbForBase 内部再做规格后缀
+    // 剥离、basename 白名单与同名原图存在性校验，找不到原图返回 null → 404）
     const base = thumbName.slice(0, -".webp".length);
     const generated = await ensureImageThumbForBase(base);
     if (!generated) return null;

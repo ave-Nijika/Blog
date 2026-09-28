@@ -97,9 +97,25 @@ export async function saveMediaFile(
 }
 
 /**
- * 生成图片缩略图（M2-补丁2 A1）：最长边 640px、webp 质量 78，落
- * uploads/images/thumb/{同名}.webp（GIF 动图保留动画帧）。
- * 生成失败由调用方决定是否阻塞（上传路径：warn 不阻塞；惰性路径：抛错→404）。
+ * thumb 文件名规格后缀（M2-补丁3 A2）：thumb 命名带档位规格
+ * {base}.w1600.webp，与旧 640px 档的 {base}.webp 天然区分——旧文件不读取、
+ * 由惰性生成自然替换（部署后旧 thumb 由部署脚本清理，代码不做删除动作）。
+ */
+export const THUMB_SPEC_SUFFIX = ".w1600";
+
+/** 原图文件名 → thumb 文件名（{base}{规格}.webp），与 lib/media.ts 的
+ * thumbnailUrlFor 映射互为同名约定（两侧都是纯函数，各自独立实现）。 */
+export function thumbFileNameFor(fileName: string): string {
+  const base = fileName.replace(/\.[A-Za-z0-9]+$/, "");
+  return `${base}${THUMB_SPEC_SUFFIX}.webp`;
+}
+
+/**
+ * 生成图片缩略图（M2-补丁2 A1，M2-补丁3 A1 提档）：最长边 1600px、webp
+ * 质量 78，落 uploads/images/thumb/{base}.w1600.webp（GIF 动图保留动画帧，
+ * 输出仍为 animated webp）。1600px 档：正文宽 ~760px + retina 屏下操作
+ * 教程类图片不放大也清晰。生成失败由调用方决定是否阻塞（上传路径：warn
+ * 不阻塞；惰性路径：抛错→404）。
  */
 export async function generateImageThumb(
   buffer: Buffer,
@@ -108,25 +124,29 @@ export async function generateImageThumb(
   const sharp = (await import("sharp")).default;
   const thumbDir = path.join(uploadsDirFor("image"), "thumb");
   await fs.mkdir(thumbDir, { recursive: true });
-  const base = fileName.replace(/\.[A-Za-z0-9]+$/, "");
-  const thumbPath = path.join(thumbDir, `${base}.webp`);
+  const thumbPath = path.join(thumbDir, thumbFileNameFor(fileName));
   // animated: true —— GIF 动图缩略图保留全部帧（静态图无影响）
   await sharp(buffer, { animated: true })
     .rotate()
-    .resize({ width: 640, height: 640, fit: "inside", withoutEnlargement: true })
+    .resize({ width: 1600, height: 1600, fit: "inside", withoutEnlargement: true })
     .webp({ quality: 78 })
     .toFile(thumbPath);
   return thumbPath;
 }
 
 /**
- * A2 惰性生成：thumb URL（/uploads/images/thumb/{base}.webp）对应原图存在
- * 但缩略图缺失时，按 basename 在 images 目录内定位原图并生成。
- * fail-closed：base 含路径穿越成分/找不到原图/生成失败 → 返回 null（调用方 404）。
+ * A2 惰性生成：thumb URL（/uploads/images/thumb/{base}.w1600.webp）对应
+ * 原图存在但缩略图缺失时，按 basename 在 images 目录内定位原图并生成。
+ * base 必须带规格后缀（M2-补丁3 A2：旧 640px 档命名 {base}.webp 不再被
+ * 读取，404 后由渲染层新命名请求自然重建）；fail-closed：base 含路径穿越
+ * 成分/无规格后缀/找不到原图/生成失败 → 返回 null（调用方 404）。
  * 只在 images 目录内活动，comfy/ 永不触碰。
  */
 export async function ensureImageThumbForBase(base: string): Promise<string | null> {
   if (!/^[A-Za-z0-9._-]+$/.test(base) || base.includes("..")) return null;
+  if (!base.endsWith(THUMB_SPEC_SUFFIX)) return null; // 旧命名/无规格 → 不读取
+  const originalBase = base.slice(0, -THUMB_SPEC_SUFFIX.length);
+  if (!originalBase) return null;
   const imagesDir = uploadsDirFor("image");
   let entries: string[] = [];
   try {
@@ -143,7 +163,7 @@ export async function ensureImageThumbForBase(base: string): Promise<string | nu
     if (dot <= 0) continue;
     const nameBase = name.slice(0, dot);
     const ext = name.slice(dot + 1).toLowerCase();
-    if (nameBase === base && IMAGE_EXTS.includes(ext)) {
+    if (nameBase === originalBase && IMAGE_EXTS.includes(ext)) {
       originalName = name;
       break;
     }
@@ -175,11 +195,11 @@ export async function deleteUploadFilesByUrls(urls: string[]): Promise<string[]>
       if (code !== "ENOENT") throw error;
     }
     // 派生缩略图顺带清理（M2-补丁2）：纯派生物，原图已删则 thumb 无意义；
-    // 不存在则忽略（历史文件/视频本就没有 thumb）
+    // 不存在则忽略（历史文件/视频本就没有 thumb）。命名同当前生成规格
+    //（{base}.w1600.webp，M2-补丁3 A2；旧 640px 档残留由部署侧清理）
     if (parsed.kind === "image") {
-      const base = parsed.fileName.replace(/\.[A-Za-z0-9]+$/, "");
       await fs
-        .unlink(path.join(uploadsDirFor("image"), "thumb", `${base}.webp`))
+        .unlink(path.join(uploadsDirFor("image"), "thumb", thumbFileNameFor(parsed.fileName)))
         .catch((error) => {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         });
