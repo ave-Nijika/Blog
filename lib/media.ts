@@ -314,6 +314,13 @@ export function isVideoUrl(url: string): boolean {
 const VIDEO_SYNTAX_LINE_RE = /@video\[([^\]]*)\]\(([^()\s]+)\)/g;
 
 /**
+ * @video 自定义语法的行内匹配（单行、非全局）。
+ * M2-补丁1 编辑器适配层也使用同一 regex 做语法识别（导出以保证语法
+ * 定义单点维护；渲染行为零改动）。
+ */
+export const VIDEO_SYNTAX_RE = /@video\[([^\]]*)\]\(([^()\s]+)\)/;
+
+/**
  * C3：把围栏外的 `@video[alt](url)` 预处理成 `![alt](url)`，交给
  * react-markdown 原生图片管线渲染；components.img 按 URL 扩展名分流到
  * 视频组件。不引入 rehype-raw、不做任何 HTML 字符串拼接（XSS 面不扩大）。
