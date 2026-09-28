@@ -1704,6 +1704,24 @@ a.ba-category-chip-active:hover {
   box-shadow: var(--shadow-md);
 }
 
+/* 富文本编辑器（M2-补丁1）：ProseMirror 根节点基础形态 */
+.post-rich-editor {
+  outline: none;
+  min-height: 22rem;
+}
+.post-rich-editor:focus {
+  outline: none;
+}
+/* 编辑区内 codeBlock 的最小可读形态（详情页高亮样式不进编辑器） */
+.post-rich-editor pre {
+  background: rgba(15, 23, 42, 0.92);
+  color: #e2e8f0;
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  overflow-x: auto;
+  font-size: 0.875rem;
+}
+
 /* ============================================
    八、路由切换进度条（保留）
    ============================================ */
