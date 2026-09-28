@@ -149,6 +149,7 @@ export const en = {
     comments: "Comments",
     regexRules: "Regex Rules",
     taxonomy: "Categories & Tags",
+    media: "Media",
     visitors: "Visitors",
     auditLogs: "Audit Logs",
     siteSettings: "Site Settings",

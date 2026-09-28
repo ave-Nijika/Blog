@@ -23,6 +23,7 @@ const NAV_ITEMS = [
   { href: "/admin/comments", key: "comments" },
   { href: "/admin/regex-rules", key: "regexRules" },
   { href: "/admin/taxonomy", key: "taxonomy" },
+  { href: "/admin/media", key: "media" },
   { href: "/admin/visitors", key: "visitors" },
   { href: "/admin/audit-logs", key: "auditLogs" },
   { href: "/admin/llm-settings", key: "llmSettings" },
