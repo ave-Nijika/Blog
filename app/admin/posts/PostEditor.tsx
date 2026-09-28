@@ -27,6 +27,7 @@ import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
 import { fetchWithCsrf } from "@/lib/fetchWithCsrf";
 import { RichTextEditor } from "@/lib/editor/RichTextEditor";
+import { TwoStepButton } from "@/components/TwoStepButton";
 import { getMarkdownComponents } from "@/lib/markdown-components";
 import {
   altFromFileName,
@@ -332,19 +333,14 @@ export function PostEditor({ initial, mode }: Props) {
   }
 
   /**
-   * B（M1-补丁2）：媒体面板"彻底删除"——先弹确认框（文案明确两种后果），
-   * 调 DELETE /api/admin/media；409 展示引用数且不重试；成功后把该文件
-   * 在本文中的全部媒体块从正文移除（文件已删，保留块只会得到坏图），
-   * 面板列表随 body 派生自动更新。
+   * B（M1-补丁2）+ M2-补丁3 C2：媒体面板"彻底删除"——确认已由按钮层
+   * 两段式内置完成（不再 window.confirm：原生对话框阻塞主线程即主人反馈
+   * 的"页面卡住"），本函数只负责执行：调 DELETE /api/admin/media；
+   * 409 展示引用数且不重试；成功后把该文件在本文中的全部媒体块从正文
+   * 移除（文件已删，保留块只会得到坏图），面板列表随 body 派生自动更新。
    */
   async function deleteMediaFile(url: string) {
     const label = url.split("/").pop() || url;
-    const confirmed = window.confirm(
-      `彻底删除「${label}」？\n\n` +
-        `· 该文件若未被任何文章引用，将从服务器永久删除（不可恢复）；\n` +
-        `· 若仍被文章引用，删除会被拒绝（不会误删）。`
-    );
-    if (!confirmed) return;
     try {
       const res = await fetchWithCsrf("/api/admin/media", {
         method: "DELETE",
@@ -958,16 +954,20 @@ function MediaPanel({
                 >
                   ✕
                 </button>
-                {/* 彻底删除（M1-补丁2 B1）：危险色实底 + 文字标签，与 ✕ 视觉区分 */}
-                <button
-                  type="button"
-                  onClick={() => onDeleteFile(item.url)}
-                  aria-label={`彻底删除文件 ${item.alt || item.url}`}
+                {/* 彻底删除（M1-补丁2 B1）：危险色实底 + 文字标签，与 ✕ 视觉区分；
+                    M2-补丁3 C2：两段式内置确认——第一击变"确认删除？"（非阻塞），
+                    3 秒内再击执行，超时回退（不再 window.confirm） */}
+                <TwoStepButton
+                  label="彻底删除"
+                  confirmLabel="确认删除？"
+                  onConfirm={() => onDeleteFile(item.url)}
                   title="从服务器永久删除该文件（仍被其他文章引用时会被拒绝）"
+                  confirmTitle="再次点击确认从服务器永久删除"
+                  ariaLabel={`彻底删除文件 ${item.alt || item.url}`}
+                  confirmAriaLabel={`确认删除文件 ${item.alt || item.url}`}
                   className="rounded-md bg-rose-600 px-2 py-1 text-xs font-medium text-white shadow-sm transition-colors hover:bg-rose-700"
-                >
-                  彻底删除
-                </button>
+                  confirmClassName="rounded-md bg-rose-700 px-2 py-1 text-xs font-medium text-white shadow-sm ring-2 ring-rose-400"
+                />
               </span>
             </li>
           );

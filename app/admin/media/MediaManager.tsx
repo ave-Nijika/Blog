@@ -9,6 +9,7 @@
  */
 import { useState } from "react";
 import { fetchWithCsrf } from "@/lib/fetchWithCsrf";
+import { TwoStepButton } from "@/components/TwoStepButton";
 
 type MediaKind = "image" | "video";
 
@@ -103,15 +104,10 @@ export function MediaManager() {
     setSelected(allSelected ? new Set() : new Set(orphans.map((o) => o.url)));
   }
 
+  /** M2-补丁3 C3：确认改由按钮层两段式内置完成（不再 window.confirm），只负责执行 */
   async function purgeSelected() {
     const urls = [...selected];
     if (urls.length === 0 || purging) return;
-    const confirmed = window.confirm(
-      `确认从服务器永久删除选中的 ${urls.length} 个文件？\n\n` +
-        `· 删除不可恢复；\n` +
-        `· 已被文章重新引用的文件会被自动跳过（不会误删）。`
-    );
-    if (!confirmed) return;
     setError(null);
     setMessage(null);
     setSkipped([]);
@@ -230,14 +226,21 @@ export function MediaManager() {
                 />
                 全选（{orphans.length} 个孤儿）
               </label>
-              <button
-                type="button"
-                onClick={() => void purgeSelected()}
+              {/* M2-补丁3 C3：两段式内置确认——第一击变"确认删除 N 个？"，
+                  再击执行；key=选中数使选中集变化即重挂载回退普通态（避免
+                  "确认删除 3 个？"实际删 4 个的漂移）；已被引用的文件后端
+                  会 skipped，不会误删 */}
+              <TwoStepButton
+                key={selected.size}
+                label={purging ? "删除中…" : `删除选中（${selected.size}）`}
+                confirmLabel={purging ? "删除中…" : `确认删除 ${selected.size} 个？`}
+                onConfirm={() => void purgeSelected()}
                 disabled={selected.size === 0 || purging}
+                title="从服务器永久删除选中文件（已被文章重新引用的会自动跳过）"
+                confirmTitle="再次点击确认从服务器永久删除"
                 className="rounded-md bg-rose-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-rose-700 disabled:opacity-50"
-              >
-                {purging ? "删除中…" : `删除选中（${selected.size}）`}
-              </button>
+                confirmClassName="rounded-md bg-rose-700 px-4 py-2 text-sm font-medium text-white shadow-sm ring-2 ring-rose-400 disabled:opacity-50"
+              />
             </div>
             <ul className="flex flex-col">
               {orphans.map((o) => (

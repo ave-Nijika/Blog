@@ -14,6 +14,8 @@
  *   - 悬停删除（B3/B4）：悬停媒体块浮现「仅从文章移除」「移除并删除文件」
  *     两个操作，取代叉叉+确认框；后者调 DELETE /api/admin/media（带
  *     excludeArticleId），409 → 仅移除节点并提示，失败保留节点并提示。
+ *     M2-补丁3 C1：删除文件动作改两段式内置确认（第一击变"确认删除？"，
+ *     3 秒内再击执行，超时/移开悬停回退），不再有任何阻塞式弹窗。
  *
  * 拖拽边界（B6）：拖拽由 NodeViewWrapper 的 data-drag-handle 承担（PM 仅在
  * 实际 dragstart——按下后产生位移——时激活）；单击/双击/悬停按钮无位移，
@@ -22,6 +24,7 @@
 import { useCallback, useState } from "react";
 import { NodeViewWrapper, type ReactNodeViewProps } from "@tiptap/react";
 import { MediaLightbox } from "@/components/MediaImage";
+import { TwoStepButton } from "@/components/TwoStepButton";
 import { thumbnailUrlFor } from "@/lib/media";
 import {
   deleteMediaFileByApi,
@@ -35,7 +38,12 @@ type ImageAttrs = {
   uploading: boolean;
 };
 
-/** B3：悬停删除动作条（图片/视频共用） */
+/**
+ * B3：悬停删除动作条（图片/视频共用）。「移除并删除文件」为两段式内置确认
+ *（M2-补丁3 C1）：第一击变"确认删除？"（非阻塞），3 秒内再击才执行；
+ * 超时或移开悬停回退普通态——不弹 window.confirm（阻塞主线程即主人反馈的
+ * "页面卡住"）。
+ */
 function MediaHoverActions({
   url,
   onRemoveOnly,
@@ -61,16 +69,18 @@ function MediaHoverActions({
       >
         ✕
       </button>
-      <button
-        type="button"
-        draggable={false}
-        onClick={onRemoveAndDelete}
+      <TwoStepButton
+        label="🗑"
+        confirmLabel="确认删除？"
+        onConfirm={onRemoveAndDelete}
+        resetOnLeave
         title="从文章移除并删除服务器文件（仍被其他文章引用时仅从本文移除）"
-        aria-label={`移除并删除文件 ${url}`}
+        confirmTitle="再次点击确认删除服务器文件"
+        ariaLabel={`移除并删除文件 ${url}`}
+        confirmAriaLabel={`确认删除文件 ${url}`}
         className="flex h-6 w-6 items-center justify-center rounded-full bg-rose-600/90 text-xs font-medium text-white shadow transition-colors hover:bg-rose-700"
-      >
-        🗑
-      </button>
+        confirmClassName="flex h-6 items-center justify-center whitespace-nowrap rounded-full bg-rose-600 px-2 text-[10px] font-medium text-white shadow ring-2 ring-white/70 transition-colors"
+      />
     </span>
   );
 }

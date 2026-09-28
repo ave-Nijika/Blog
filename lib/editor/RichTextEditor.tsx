@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BubbleMenu, EditorContent, useEditor, type Editor } from "@tiptap/react";
 import { fetchWithCsrf } from "@/lib/fetchWithCsrf";
+import { TwoStepButton } from "@/components/TwoStepButton";
 import {
   altFromFileName,
   fileExtensionOf,
@@ -218,17 +219,15 @@ export function RichTextEditor({
     return true;
   }, []);
 
-  /** B3：彻底删除 = 移除节点 + 删盘（带 excludeArticleId 修"自身引用"语义） */
+  /**
+   * B3：彻底删除 = 移除节点 + 删盘（带 excludeArticleId 修"自身引用"语义）。
+   * M2-补丁3 C：确认改由按钮层两段式内置完成（不再 window.confirm——阻塞
+   * 主线程即主人反馈的"页面卡住"），本函数只负责执行。
+   */
   const deleteMediaPermanently = useCallback(async () => {
     const target = selectedMediaRef.current;
     if (!target || !editor) return;
     const label = target.url.split("/").pop() || target.url;
-    const confirmed = window.confirm(
-      `彻底删除「${label}」？\n\n` +
-        `· 该文件若未被其他文章引用，将从服务器永久删除（不可恢复）；\n` +
-        `· 若仍被其他文章引用，将仅从本文移除，文件保留。`
-    );
-    if (!confirmed) return;
     try {
       const res = await fetchWithCsrf("/api/admin/media", {
         method: "DELETE",
@@ -401,14 +400,16 @@ export function RichTextEditor({
         >
           替换文件
         </button>
-        <button
-          type="button"
-          onClick={() => void deleteMediaPermanently()}
-          className="rounded bg-rose-600 px-2 py-1 text-xs font-medium text-white transition-colors hover:bg-rose-700"
+        {/* M2-补丁3 C：两段式内置确认——第一击变"确认删除？"，3 秒内再击执行 */}
+        <TwoStepButton
+          label="彻底删除"
+          confirmLabel="确认删除？"
+          onConfirm={() => void deleteMediaPermanently()}
           title="从服务器永久删除（仍被其他文章引用时仅从本文移除）"
-        >
-          彻底删除
-        </button>
+          confirmTitle="再次点击确认从服务器永久删除"
+          className="rounded bg-rose-600 px-2 py-1 text-xs font-medium text-white transition-colors hover:bg-rose-700"
+          confirmClassName="rounded bg-rose-700 px-2 py-1 text-xs font-medium text-white ring-2 ring-rose-400"
+        />
         </div>
       </BubbleMenu>
 
