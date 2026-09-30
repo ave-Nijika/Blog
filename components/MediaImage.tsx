@@ -16,10 +16,14 @@
  * M2-补丁5：灯箱 blur-up 秒开——打开瞬间渲染浏览器已缓存的 w1600 缩略图
  * （blur 弱化），原图后台 fetch（AbortController 可中断）就绪后淡入替换，
  * 消除点击放大的白屏等待；加载中随时可关（abort，见 BlurPhase 状态机）。
+ * M2-补丁6：正文图片回归浏览器原生懒加载（loading="lazy" + CSS 占位淡入）
+ * 取代 BaLazyImage——SSR HTML 直出 src 与占位（文字与占位同时到达，图片
+ * 加载不再依赖 JS hydration）；视口外浏览器自行不加载；导航离开页面时
+ * 浏览器自动取消未完成请求（BaLazyImage 三病根一次满足）。缩略图映射、
+ * 失败降级、协议校验、灯箱语义零变化。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { BaLazyImage } from "@/components/BaLazyImage";
 import { isSafeMediaUrl, thumbnailUrlFor } from "@/lib/media";
 
 function MediaFallback({ message }: { message: string }) {
@@ -244,7 +248,15 @@ export function MediaImage({ src, alt }: { src?: string; alt?: string }) {
   const [open, setOpen] = useState(false);
   // D1/A4：默认缩略图；加载失败（如 sharp 无法处理的历史图）降级原图
   const [thumbFailed, setThumbFailed] = useState(false);
+  // M2-补丁6 A2：原生懒加载 + 占位淡入
+  const [loaded, setLoaded] = useState(false);
   const close = useCallback(() => setOpen(false), []);
+
+  // 缓存命中的图片可能在 hydration 完成前就 complete（onLoad 事件已错过）
+  // ——ref 回调兜底置位，避免占位色块永不消失
+  const imgRef = useCallback((el: HTMLImageElement | null) => {
+    if (el?.complete && el.naturalWidth > 0) setLoaded(true);
+  }, []);
 
   if (!src || !isSafeMediaUrl(src)) {
     return <MediaFallback message="图片地址不可用" />;
@@ -252,15 +264,34 @@ export function MediaImage({ src, alt }: { src?: string; alt?: string }) {
   const thumb = thumbFailed ? null : thumbnailUrlFor(src);
   return (
     <>
-      {/* inline 模式：span 根节点，保证 img 组件可以合法出现在 <p> 段落内 */}
-      <span className="block my-2">
-        <BaLazyImage
+      {/* span 根节点：img 组件可以合法出现在 <p> 段落内。未加载时 min-h
+          提供占位色块高度（M2-补丁6 A2）；加载后移除 min-h，由图片自然
+          撑高（高度随加载增长为任务书可接受项） */}
+      <span className={"relative block my-2 " + (loaded ? "" : "min-h-[6rem]")}>
+        {!loaded && (
+          <span
+            className="absolute inset-0 animate-pulse bg-[color:rgb(var(--ba-primary-soft))] dark:bg-slate-800"
+            aria-hidden
+          />
+        )}
+        {/* M2-补丁6 A1：浏览器原生懒加载取代 BaLazyImage——SSR HTML 直出
+            src 与占位（文字与占位同时到达，不依赖 JS hydration）；视口外
+            浏览器自行不加载；导航离开页面时浏览器自动取消未完成请求。
+            缩略图映射与失败降级语义与 BaLazyImage 时代一致 */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          ref={imgRef}
+          loading="lazy"
+          decoding="async"
           src={thumb ?? src}
           alt={alt ?? ""}
-          inline
-          className="mx-auto h-auto max-w-full cursor-zoom-in"
           onClick={() => setOpen(true)}
-          onLoadError={thumb ? () => setThumbFailed(true) : undefined}
+          onLoad={() => setLoaded(true)}
+          onError={thumb ? () => setThumbFailed(true) : undefined}
+          className={
+            "mx-auto block h-auto max-w-full cursor-zoom-in transition-opacity duration-500 " +
+            (loaded ? "opacity-100" : "opacity-0")
+          }
         />
       </span>
       {open && <MediaLightbox src={src} alt={alt ?? ""} onClose={close} />}

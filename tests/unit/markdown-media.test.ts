@@ -104,6 +104,32 @@ describe("共享渲染配置：@video 与图片（F5）", () => {
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
   });
 
+  it("M2-补丁6 E1：正文图片为原生懒加载 img（SSR 直出，不依赖 hydration）", () => {
+    const { container } = renderMarkdown(
+      "![截图](/uploads/images/20260101-abcd1234.png)"
+    );
+    const img = container.querySelector("img");
+    expect(img).toBeTruthy();
+    // 浏览器原生懒加载（取代 BaLazyImage 的 hydration 驱动懒加载）：
+    // SSR HTML 直接带 src，文字与占位同时到达；导航离开时浏览器自动取消请求
+    expect(img!.getAttribute("loading")).toBe("lazy");
+    expect(img!.getAttribute("decoding")).toBe("async");
+    // 缩略图直出（SSR 即有 src）
+    expect(img!.getAttribute("src")).toBe(
+      "/uploads/images/thumb/20260101-abcd1234.w1600.webp"
+    );
+  });
+
+  it("M2-补丁6 E1：缩略图加载失败降级原图（不 404）", () => {
+    const { container } = renderMarkdown(
+      "![截图](/uploads/images/20260101-abcd1234.png)"
+    );
+    const img = container.querySelector("img")!;
+    fireEvent.error(img);
+    // onError → setThumbFailed → src 切原图（降级语义与 BaLazyImage 时代一致）
+    expect(img.getAttribute("src")).toBe("/uploads/images/20260101-abcd1234.png");
+  });
+
   it("D1：视频/外链图片不映射缩略图（直接原图）", () => {
     const { container } = renderMarkdown(
       "![外链](https://example.com/a.png)"
