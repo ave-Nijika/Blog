@@ -79,6 +79,9 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - ./nginx/ssl:/etc/nginx/ssl:ro
+      # M2-补丁6：uploads 持久化卷直挂 nginx（只读）——媒体流量 sendfile
+      # 静态直出，完全绕开 Node 进程（与 app 服务同一 uploads-data 卷）
+      - uploads-data:/var/www/uploads:ro
     restart: unless-stopped
     depends_on:
       app:
