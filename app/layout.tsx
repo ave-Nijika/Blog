@@ -15,7 +15,7 @@ import { DeviceModeToggle } from "@/components/DeviceModeToggle";
 // 如需恢复共存：取消下方注释并重新启用 RippleProvider 包裹。
 // import { RippleProvider } from "@/components/RippleProvider";
 import { RouteProgress } from "@/components/RouteProgress";
-import { BaCursor } from "@/components/BaCursor";
+import { ClickPulse } from "@/components/ClickPulse";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
 import { BeianFooter } from "@/components/BeianFooter";
@@ -99,7 +99,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
         {/* 进站加载页：每会话一次 ≤1.2s，reduced-motion/无 JS 自动跳过 */}
         <BaLoader />
         <RouteProgress />
-        <BaCursor />
+        <ClickPulse />
         <ThemeProvider>
           <LocaleProvider initialLocale={DEFAULT_LOCALE}>
             <Header links={links} locale={locale} />

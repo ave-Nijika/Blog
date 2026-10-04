@@ -763,82 +763,40 @@ html.ba-loader-off .ba-loader {
 }
 
 /* ============================================
-   五、自定义三角光标（官网同款，桌面指针设备启用）
-   由 components/BaCursor.tsx 挂 html.ba-cursor-active 类。
+   五、CSS 自定义指针（M2-补丁8：替换系统指针本身）
+   三角 / 文本 I-beam 内联 data URI——零额外请求、首帧即生效（无
+   "先原生后切换"的闪烁）。与旧 DOM 伪光标的本质区别：指针由浏览器
+   原生层绘制，天然盖过原生滚动条（旧伪光标 z-index 再高也盖不住），
+   拖动滚动条时零延迟跟手（旧 rAF 缓动滞后，且按住滚动条后页面收不到
+   mousemove 伪光标会冻结——主人裁决整体改瞬时并移除跟随层）。
+   热点 = 三角尖端 (3, 2)（M2-补丁7 推导 (3.15, 2.25) 取整）；
+   I-beam 热点 (9, 9) = 竖干中心。
+   仅精细指针设备应用；纯触屏（pointer: coarse）不做任何 cursor 处理。
+   注：cursor 图像受 CSP img-src 管辖，部署侧 conf 已含 data:（无需改）。
    ============================================ */
 
-html.ba-cursor-active,
-html.ba-cursor-active * {
-  /* M2-补丁7：文本输入不再保留原生 I-beam 例外（原 input/textarea/select
-     的 cursor:text 已移除）——hover 输入类元素时由 BaCursor 切换伪光标的
-     自定义文本形态（蓝 I-beam），风格与三角统一。 */
-  cursor: none !important;
-}
-
-.ba-cursor {
-  position: fixed;
-  top: 0;
-  left: 0;
-  /* M2-补丁4b（凛）：提到 int32 上限——原 9999 与 MediaLightbox 同层，
-     灯箱 portal 在 body 末尾按 DOM 序后绘制，把蓝三角盖住（主人观感
-     "光标沉到图片下面"）。zcode 勘察实测 2147483647 后三角恒定可见。 */
-  z-index: 2147483647;
-  pointer-events: none;
-  will-change: transform;
-  filter: drop-shadow(0 1px 3px rgba(18, 137, 249, 0.45));
-  transition: opacity 200ms ease-out;
-  /* 三角/文本两形态 SVG 同格叠放（M2-补丁7） */
-  display: grid;
-}
-
-.ba-cursor > svg {
-  grid-area: 1 / 1;
-}
-
-.ba-cursor svg {
-  display: block;
-  transition: transform 160ms var(--ease-bounce);
-}
-
-/* 三角：按下收缩以尖端为锚（17.5% 12.5% = 尖端 (3.15, 2.25) / 18px，
-   与 BaCursor.tsx 的 TRI_TIP_OFFSET 推导一致），贴合物理指针直觉 */
-.ba-cursor .ba-cursor-tri {
-  transform-origin: 17.5% 12.5%;
-  transition:
-    transform 160ms var(--ease-bounce),
-    opacity 160ms ease-out;
-}
-
-/* 文本形态 I-beam：竖干居中，默认隐藏，.is-text 时与三角交叉淡化 */
-.ba-cursor .ba-cursor-beam {
-  transform-origin: 50% 50%;
-  opacity: 0;
-  transition:
-    transform 160ms var(--ease-bounce),
-    opacity 160ms ease-out;
-}
-
-.ba-cursor.is-down svg {
-  transform: scale(0.82);
-}
-
-.ba-cursor.is-text .ba-cursor-tri {
-  opacity: 0;
-}
-
-.ba-cursor.is-text .ba-cursor-beam {
-  opacity: 1;
-}
-
-@media (pointer: coarse) {
-  .ba-cursor {
-    display: none;
+@media (pointer: fine) {
+  html,
+  html * {
+    cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' width='18' height='18'%3E%3Cpath d='M3.5 2.5 L17 10 L3.5 17.5 Z' fill='rgb(18,137,249)' stroke='white' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E") 3 2, auto !important;
   }
-}
 
-@media (prefers-reduced-motion: reduce) {
-  .ba-cursor {
-    display: none;
+  /* 输入区：自定义文本指针（白名单沿用 M2-补丁7；select / checkbox /
+     range 等非文本控件继承全局三角；输入时闪烁的 caret 是文本插入符、
+     由浏览器绘制，不受 cursor 图像影响） */
+  html input[type="text"],
+  html input[type="search"],
+  html input[type="url"],
+  html input[type="tel"],
+  html input[type="email"],
+  html input[type="password"],
+  html input[type="number"],
+  html input:not([type]),
+  html textarea,
+  html [contenteditable=""],
+  html [contenteditable="true"],
+  html [contenteditable="plaintext-only"] {
+    cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' width='18' height='18'%3E%3Cpath d='M5.2 3.2 H14.8 M5.2 16.8 H14.8 M10 3.2 V16.8' fill='none' stroke='white' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M5.2 3.2 H14.8 M5.2 16.8 H14.8 M10 3.2 V16.8' fill='none' stroke='rgb(18,137,249)' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 9 9, text !important;
   }
 }
 
