@@ -769,14 +769,10 @@ html.ba-loader-off .ba-loader {
 
 html.ba-cursor-active,
 html.ba-cursor-active * {
+  /* M2-补丁7：文本输入不再保留原生 I-beam 例外（原 input/textarea/select
+     的 cursor:text 已移除）——hover 输入类元素时由 BaCursor 切换伪光标的
+     自定义文本形态（蓝 I-beam），风格与三角统一。 */
   cursor: none !important;
-}
-
-/* 文本输入保留原生 I-beam（后台表单可用性优先） */
-html.ba-cursor-active input,
-html.ba-cursor-active textarea,
-html.ba-cursor-active select {
-  cursor: text !important;
 }
 
 .ba-cursor {
@@ -791,16 +787,47 @@ html.ba-cursor-active select {
   will-change: transform;
   filter: drop-shadow(0 1px 3px rgba(18, 137, 249, 0.45));
   transition: opacity 200ms ease-out;
+  /* 三角/文本两形态 SVG 同格叠放（M2-补丁7） */
+  display: grid;
+}
+
+.ba-cursor > svg {
+  grid-area: 1 / 1;
 }
 
 .ba-cursor svg {
   display: block;
   transition: transform 160ms var(--ease-bounce);
-  transform-origin: 30% 50%;
+}
+
+/* 三角：按下收缩以尖端为锚（17.5% 12.5% = 尖端 (3.15, 2.25) / 18px，
+   与 BaCursor.tsx 的 TRI_TIP_OFFSET 推导一致），贴合物理指针直觉 */
+.ba-cursor .ba-cursor-tri {
+  transform-origin: 17.5% 12.5%;
+  transition:
+    transform 160ms var(--ease-bounce),
+    opacity 160ms ease-out;
+}
+
+/* 文本形态 I-beam：竖干居中，默认隐藏，.is-text 时与三角交叉淡化 */
+.ba-cursor .ba-cursor-beam {
+  transform-origin: 50% 50%;
+  opacity: 0;
+  transition:
+    transform 160ms var(--ease-bounce),
+    opacity 160ms ease-out;
 }
 
 .ba-cursor.is-down svg {
   transform: scale(0.82);
+}
+
+.ba-cursor.is-text .ba-cursor-tri {
+  opacity: 0;
+}
+
+.ba-cursor.is-text .ba-cursor-beam {
+  opacity: 1;
 }
 
 @media (pointer: coarse) {
